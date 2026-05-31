@@ -148,7 +148,14 @@ def build_comparison_data(
     brand_b: str,
     articles_a: list[dict],
     articles_b: list[dict],
+    article_ids: list[str] | None = None,
 ) -> dict:
+    """构建双品牌对比数据；传入 article_ids 时仅统计样本内的文章。"""
+    if article_ids is not None:
+        id_set = set(article_ids)
+        articles_a = [a for a in articles_a if a.get("id") in id_set]
+        articles_b = [a for a in articles_b if a.get("id") in id_set]
+
     freq_a = extract_keyword_freq(articles_a)
     freq_b = extract_keyword_freq(articles_b)
     kw = compare_keywords(freq_a, freq_b)
@@ -165,6 +172,8 @@ def build_comparison_data(
         "freq_a": freq_a,
         "freq_b": freq_b,
         "keywords": kw,
+        "use_sample": article_ids is not None,
+        "sample_count": len(article_ids) if article_ids else None,
     }
 
 

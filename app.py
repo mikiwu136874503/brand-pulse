@@ -1,7 +1,7 @@
 import html
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +13,11 @@ from dotenv import load_dotenv
 import db
 from ai_classifier import classify_article
 from ai_summarizer import generate_summary
-from brand_comparison import build_comparison_data, render_keyword_wordclouds
+from brand_comparison import (
+    build_comparison_data,
+    get_category_distribution,
+    render_keyword_wordclouds,
+)
 from brand_tone_analyzer import analyze_brand_tone
 from content_strategy_generator import generate_content_strategy
 from gap_analyzer import generate_gap_analysis
@@ -307,6 +311,115 @@ def inject_global_css() -> None:
             color: {C_TEXT} !important;
             border: none !important;
         }}
+        /* 样式标记占位：不占垂直空间，避免按钮错位 */
+        .bp-style-marker {{
+            display: block !important;
+            height: 0 !important;
+            width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            line-height: 0 !important;
+            border: none !important;
+            font-size: 0 !important;
+        }}
+        /* 表单行内控件垂直居中 */
+        .bp-form-action-anchor + div[data-testid="stHorizontalBlock"] {{
+            align-items: center !important;
+        }}
+        /* 收藏按钮 */
+        .bp-favorite-active + div[data-testid="stButton"] > button,
+        .bp-favorite-active + div[data-testid="stButton"] > button p,
+        .bp-favorite-active + div[data-testid="stButton"] > button span {{
+            background: rgba(255, 193, 7, 0.12) !important;
+            color: #FFC107 !important;
+            border: 1px solid rgba(255, 193, 7, 0.45) !important;
+            font-weight: 600 !important;
+            transition: box-shadow 0.2s ease, border-color 0.2s ease !important;
+        }}
+        .bp-favorite-active + div[data-testid="stButton"] > button:hover,
+        .bp-favorite-active + div[data-testid="stButton"] > button:hover p,
+        .bp-favorite-active + div[data-testid="stButton"] > button:hover span {{
+            box-shadow: 0 0 12px rgba(255, 193, 7, 0.45) !important;
+            border-color: #FFC107 !important;
+        }}
+        .bp-favorite-inactive + div[data-testid="stButton"] > button,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button p,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button span {{
+            background: transparent !important;
+            color: #5A6A8A !important;
+            border: 1px solid {C_BORDER} !important;
+            transition: box-shadow 0.2s ease, color 0.2s ease, border-color 0.2s ease !important;
+        }}
+        .bp-favorite-inactive + div[data-testid="stButton"] > button:hover,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button:hover p,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button:hover span {{
+            color: #FFC107 !important;
+            border-color: rgba(255, 193, 7, 0.5) !important;
+            box-shadow: 0 0 10px rgba(255, 193, 7, 0.25) !important;
+        }}
+        /* 文章样本选择复选框 */
+        .bp-pick-zone + div[data-testid="stCheckbox"] label {{
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+        }}
+        .bp-pick-zone + div[data-testid="stCheckbox"] label > div:first-child {{
+            background: rgba(19, 26, 43, 0.6) !important;
+            border: 1px solid {C_BORDER} !important;
+            border-radius: 4px !important;
+            transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease !important;
+        }}
+        .bp-pick-checked + div[data-testid="stCheckbox"] label > div:first-child {{
+            background: rgba(0, 212, 255, 0.14) !important;
+            border: 1px solid {C_ACCENT} !important;
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.35) !important;
+        }}
+        .bp-pick-checked + div[data-testid="stCheckbox"] label > div:first-child svg {{
+            color: {C_ACCENT} !important;
+            stroke: {C_ACCENT} !important;
+        }}
+        /* 设为对比样本按钮 */
+        .bp-set-sample-zone + div[data-testid="stButton"] > button,
+        .bp-set-sample-zone + div[data-testid="stButton"] > button p,
+        .bp-set-sample-zone + div[data-testid="stButton"] > button span {{
+            background: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            border: none !important;
+            font-weight: 700 !important;
+            box-shadow: 0 0 14px rgba(0, 212, 255, 0.35) !important;
+        }}
+        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover,
+        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover p,
+        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover span {{
+            background: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.55) !important;
+        }}
+        /* 一键更新全部品牌按钮 */
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button p,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button span {{
+            background: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            border: none !important;
+            font-weight: 700 !important;
+            box-shadow: 0 0 16px rgba(0, 212, 255, 0.4) !important;
+        }}
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover p,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover span {{
+            background: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            box-shadow: 0 0 22px rgba(0, 212, 255, 0.6) !important;
+        }}
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled p,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled span {{
+            background: rgba(0, 212, 255, 0.25) !important;
+            color: rgba(11, 15, 25, 0.55) !important;
+            box-shadow: none !important;
+        }}
         a[data-testid="stBaseLinkButton"],
         a[data-testid="stLinkButton"], [data-testid="stLinkButton"] a,
         a[data-testid="stBaseLinkButton"] p, [data-testid="stLinkButton"] a p {{
@@ -367,6 +480,49 @@ def inject_global_css() -> None:
             color: #5A6A8A !important;
             opacity: 1 !important;
             -webkit-text-fill-color: #5A6A8A !important;
+        }}
+        /* 日期输入框 */
+        .stDateInput > div,
+        .stDateInput > div > div,
+        .stDateInput [data-baseweb="input"] {{
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }}
+        .stDateInput input {{
+            background-color: {C_CARD} !important;
+            color: {C_TEXT} !important;
+            border: 1px solid {C_BORDER} !important;
+            border-radius: 6px !important;
+            caret-color: {C_ACCENT} !important;
+        }}
+        .stDateInput input::placeholder {{
+            color: #5A6A8A !important;
+        }}
+        .stDateInput input:focus {{
+            border-color: {C_ACCENT} !important;
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.25) !important;
+        }}
+        /* 时间筛选 radio */
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {{
+            border-color: {C_BORDER} !important;
+            background: {C_CARD} !important;
+        }}
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"] > div:first-child {{
+            border-color: {C_ACCENT} !important;
+            background: rgba(0, 212, 255, 0.12) !important;
+        }}
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"] > div:first-child svg {{
+            fill: {C_ACCENT} !important;
+        }}
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"] p,
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"] span {{
+            color: {C_TEXT_SEC} !important;
+        }}
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"] p,
+        .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"] span {{
+            color: {C_ACCENT} !important;
+            font-weight: 600 !important;
         }}
         input:focus, textarea:focus,
         .stTextInput input:focus, .stTextArea textarea:focus,
@@ -614,7 +770,10 @@ def style_plotly_fig(fig):
 
 
 def mark_delete_zone() -> None:
-    st.markdown('<div class="bp-delete-zone"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="bp-style-marker bp-delete-zone"></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def build_topics_dataframe(topic_distribution: list[dict]) -> pd.DataFrame:
@@ -750,40 +909,59 @@ def render_brand_topic_pie(brand_name: str, topic_distribution: list[dict]) -> N
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_topic_distribution_comparison(brand_a: str, brand_b: str) -> None:
+def render_topic_distribution_comparison(
+    brand_a: str,
+    brand_b: str,
+    *,
+    articles_a: list[dict] | None = None,
+    articles_b: list[dict] | None = None,
+    use_sample: bool = False,
+) -> None:
     """双品牌主题分布对比：并排饼图 + 分组柱状图。"""
-    cache_a = get_cached_tone_analysis(brand_a)
-    cache_b = get_cached_tone_analysis(brand_b)
-    topics_a = cache_a["result"]["topic_distribution"] if cache_a else None
-    topics_b = cache_b["result"]["topic_distribution"] if cache_b else None
+    if use_sample:
+        st.caption("样本模式：主题分布基于样本文章的 AI 分类统计。")
+        topics_a = articles_to_topic_distribution(articles_a or [])
+        topics_b = articles_to_topic_distribution(articles_b or [])
+        if not articles_a:
+            st.warning(f"样本中无「{brand_a}」的文章。")
+        if not articles_b:
+            st.warning(f"样本中无「{brand_b}」的文章。")
+        if not topics_a and not topics_b:
+            st.caption("样本文章暂无分类数据，请先在文章列表中使用「AI 分类」。")
+            return
+    else:
+        cache_a = get_cached_tone_analysis(brand_a)
+        cache_b = get_cached_tone_analysis(brand_b)
+        topics_a = cache_a["result"]["topic_distribution"] if cache_a else None
+        topics_b = cache_b["result"]["topic_distribution"] if cache_b else None
 
-    missing_brands: list[str] = []
-    if not cache_a:
-        missing_brands.append(brand_a)
-    if not cache_b:
-        missing_brands.append(brand_b)
+        missing_brands: list[str] = []
+        if not cache_a:
+            missing_brands.append(brand_a)
+        if not cache_b:
+            missing_brands.append(brand_b)
 
-    for name in missing_brands:
-        st.info(f"请先在品牌对比分析页对「{name}」执行「分析品牌调性」。")
+        for name in missing_brands:
+            st.info(f"请先在品牌对比分析页对「{name}」执行「分析品牌调性」。")
 
-    if not cache_a and not cache_b:
-        return
+        if not cache_a and not cache_b:
+            return
 
     pie_col1, pie_col2 = st.columns(2)
     with pie_col1:
-        if topics_a is not None:
+        if topics_a:
             render_brand_topic_pie(brand_a, topics_a)
         else:
             st.markdown(f"**{brand_a}**")
             st.caption("暂无主题分布数据。")
     with pie_col2:
-        if topics_b is not None:
+        if topics_b:
             render_brand_topic_pie(brand_b, topics_b)
         else:
             st.markdown(f"**{brand_b}**")
             st.caption("暂无主题分布数据。")
 
-    if cache_a and cache_b and topics_a is not None and topics_b is not None:
+    if topics_a and topics_b:
         combined_df = build_combined_topics_bar_df(
             brand_a, topics_a, brand_b, topics_b
         )
@@ -803,11 +981,490 @@ def render_topic_distribution_comparison(brand_a: str, brand_b: str) -> None:
             st.plotly_chart(fig_bar, use_container_width=True)
 
 
+PICK_CB_PREFIX = "pick_cb_"
+
+
+def pick_checkbox_key(article_id: str) -> str:
+    return f"{PICK_CB_PREFIX}{article_id}"
+
+
+def init_checked_article_ids() -> set[str]:
+    """初始化并返回跨筛选持久化的勾选文章 ID 集合。"""
+    if "checked_article_ids" not in st.session_state:
+        st.session_state.checked_article_ids = set()
+    return st.session_state.checked_article_ids
+
+
+def _on_pick_checkbox_change(article_id: str) -> None:
+    """复选框变更时同步更新 checked_article_ids。"""
+    checked = init_checked_article_ids()
+    key = pick_checkbox_key(article_id)
+    if st.session_state.get(key):
+        checked.add(article_id)
+    else:
+        checked.discard(article_id)
+
+
+def get_selected_sample_ids() -> list[str]:
+    return list(st.session_state.get("selected_article_ids") or [])
+
+
+def articles_to_topic_distribution(articles: list[dict]) -> list[dict]:
+    """将样本文章的分类分布转换为主题占比，供样本模式下的主题对比。"""
+    df = get_category_distribution(articles)
+    if df.empty:
+        return []
+    total = int(df["count"].sum())
+    if total <= 0:
+        return []
+    return [
+        {
+            "topic": row["category"],
+            "percentage": round(row["count"] / total * 100, 1),
+        }
+        for _, row in df.iterrows()
+    ]
+
+
+def resolve_compare_articles(
+    brand_a: str, brand_b: str, use_sample: bool
+) -> tuple[list[dict], list[dict], list[str]]:
+    """解析对比用文章列表；返回 (articles_a, articles_b, warnings)。"""
+    warnings: list[str] = []
+    if not use_sample:
+        return db.list_articles(brand_a), db.list_articles(brand_b), warnings
+
+    sample_ids = get_selected_sample_ids()
+    if not sample_ids:
+        warnings.append("尚未设置对比样本，请先在品牌内容管理页勾选文章并设为对比样本。")
+        return [], [], warnings
+
+    sample_articles = db.get_articles_by_ids(sample_ids)
+    missing_count = len(sample_ids) - len(sample_articles)
+    if missing_count > 0:
+        warnings.append(f"样本中有 {missing_count} 篇文章已不存在，已自动忽略。")
+        st.session_state["selected_article_ids"] = [a["id"] for a in sample_articles]
+
+    articles_a = [a for a in sample_articles if a["brand_name"] == brand_a]
+    articles_b = [a for a in sample_articles if a["brand_name"] == brand_b]
+    if not articles_a:
+        warnings.append(f"样本中无「{brand_a}」的文章。")
+    if not articles_b:
+        warnings.append(f"样本中无「{brand_b}」的文章。")
+    return articles_a, articles_b, warnings
+
+
+def mark_pick_checkbox_zone(checked: bool) -> None:
+    css_class = "bp-pick-checked" if checked else "bp-pick-unchecked"
+    st.markdown(
+        f'<div class="bp-style-marker {css_class} bp-pick-zone"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def mark_set_sample_btn_zone() -> None:
+    st.markdown(
+        '<div class="bp-style-marker bp-set-sample-zone"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def mark_fetch_all_btn_zone() -> None:
+    st.markdown(
+        '<div class="bp-style-marker bp-fetch-all-zone"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def fetch_all_brands_content(brands: list[dict]) -> tuple[int, int, list[str]]:
+    """
+    依次采集全部品牌内容并入库。
+    返回 (新增总数, 跳过总数, 失败品牌描述列表)。
+    """
+    total = len(brands)
+    total_new = 0
+    total_skipped = 0
+    failed_brands: list[str] = []
+
+    progress_bar = st.progress(0, text="准备开始采集…")
+    status_text = st.empty()
+
+    for index, brand in enumerate(brands, start=1):
+        brand_name = brand["brand_name"]
+        status_text.caption(f"正在采集 {index}/{total}：{brand_name}…")
+        progress_bar.progress(
+            (index - 1) / total,
+            text=f"正在采集 {index}/{total}：{brand_name}…",
+        )
+
+        try:
+            articles, error = fetch_brand_content(
+                brand["rss_url"],
+                brand_name,
+                brand.get("source_type"),
+            )
+        except Exception as exc:
+            failed_brands.append(f"「{brand_name}」（{exc}）")
+            continue
+
+        if error:
+            failed_brands.append(f"「{brand_name}」（{error}）")
+            continue
+
+        new_count, skipped_count = db.save_articles(articles)
+        total_new += new_count
+        total_skipped += skipped_count
+        progress_bar.progress(
+            index / total,
+            text=f"正在采集 {index}/{total}：{brand_name}…",
+        )
+
+    progress_bar.progress(1.0, text="采集完成")
+    progress_bar.empty()
+    status_text.empty()
+    return total_new, total_skipped, failed_brands
+
+
+def render_article_sample_toolbar(visible_articles: list[dict]) -> None:
+    """文章样本选择工具栏：全选、取消全选、设为对比样本、已选计数。"""
+    checked = init_checked_article_ids()
+    picked_count = len(checked)
+    sample_count = len(get_selected_sample_ids())
+    visible_ids = {article["id"] for article in visible_articles}
+
+    left_col, sample_col = st.columns([3, 1], vertical_alignment="center")
+    with left_col:
+        pick_col1, pick_col2 = st.columns([1, 1], vertical_alignment="center")
+        with pick_col1:
+            if st.button(
+                "全选当前显示文章",
+                key="pick_all_visible",
+                use_container_width=True,
+            ):
+                checked.update(visible_ids)
+                st.rerun()
+        with pick_col2:
+            if st.button(
+                "取消全选",
+                key="pick_clear_visible",
+                use_container_width=True,
+            ):
+                checked.difference_update(visible_ids)
+                st.rerun()
+    with sample_col:
+        if st.button(
+            "将选中文章设为对比样本",
+            key="set_compare_sample",
+            type="primary",
+            use_container_width=True,
+        ):
+            picked_ids = list(checked)
+            if not picked_ids:
+                st.warning("请先勾选文章。")
+            else:
+                valid_articles = db.get_articles_by_ids(picked_ids)
+                if not valid_articles:
+                    st.warning("所选文章已不存在，请重新勾选。")
+                else:
+                    st.session_state["selected_article_ids"] = [
+                        a["id"] for a in valid_articles
+                    ]
+                    if len(valid_articles) < len(picked_ids):
+                        set_flash_message(
+                            "warning",
+                            f"部分已选文章已不存在，已设为 {len(valid_articles)} 篇有效样本。",
+                        )
+                        checked.intersection_update({a["id"] for a in valid_articles})
+                    else:
+                        set_flash_message(
+                            "success",
+                            f"已设置对比样本：{len(valid_articles)} 篇文章",
+                        )
+                    st.rerun()
+
+    status_hint = f"已选择 {picked_count} 篇文章"
+    if sample_count:
+        status_hint += f" · 当前对比样本：{sample_count} 篇（可在品牌对比页选用）"
+    st.caption(status_hint)
+
+
 def mark_action_btn_zone() -> None:
-    st.markdown('<div class="bp-action-btn-zone"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="bp-style-marker bp-action-btn-zone"></div>',
+        unsafe_allow_html=True,
+    )
 
 
-    st.markdown('<div class="bp-action-btn-zone"></div>', unsafe_allow_html=True)
+def mark_favorite_btn_zone(is_favorite: bool) -> None:
+    """标记收藏按钮区域，供 CSS 区分已收藏 / 未收藏样式。"""
+    css_class = "bp-favorite-active" if is_favorite else "bp-favorite-inactive"
+    st.markdown(
+        f'<div class="bp-style-marker {css_class}"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def article_is_favorite(article: dict) -> bool:
+    return int(article.get("is_favorite") or 0) == 1
+
+
+ARTICLE_TIME_PRESETS = ("全部", "今日", "3日内", "7日内", "30日内")
+
+
+def init_article_time_filters() -> None:
+    """初始化文章时间筛选 session 状态。"""
+    if "article_time_preset" not in st.session_state:
+        st.session_state.article_time_preset = "全部"
+    if "article_time_last_preset" not in st.session_state:
+        st.session_state.article_time_last_preset = "全部"
+    if "article_time_use_custom" not in st.session_state:
+        st.session_state.article_time_use_custom = False
+
+
+def _on_time_preset_change() -> None:
+    """快捷时间选项变更时退出自定义模式并记录上次快捷选项。"""
+    st.session_state.article_time_use_custom = False
+    preset = st.session_state.get("article_time_preset", "全部")
+    if preset != "全部":
+        st.session_state.article_time_last_preset = preset
+
+
+def _iso_datetime(value: datetime) -> str:
+    return value.isoformat(timespec="seconds")
+
+
+def resolve_article_published_range() -> tuple[str | None, str | None, str]:
+    """
+    解析当前时间筛选范围。
+    返回 (published_start, published_end, 显示标签)；全部为 (None, None, "全部")。
+    """
+    init_article_time_filters()
+
+    if st.session_state.get("article_time_use_custom"):
+        custom_start = st.session_state.get("article_custom_start")
+        custom_end = st.session_state.get("article_custom_end")
+        if custom_start and custom_end:
+            start_dt = datetime.combine(custom_start, time.min)
+            end_dt = datetime.combine(custom_end, time(23, 59, 59))
+            if start_dt > end_dt:
+                start_dt, end_dt = end_dt, start_dt
+            label = f"{custom_start} 至 {custom_end}"
+            return _iso_datetime(start_dt), _iso_datetime(end_dt), label
+
+    preset = st.session_state.get("article_time_preset", "全部")
+    if preset == "全部":
+        return None, None, "全部"
+
+    now = datetime.now()
+    today_start = datetime.combine(now.date(), time.min)
+    preset_days = {"今日": 1, "3日内": 3, "7日内": 7, "30日内": 30}
+    days = preset_days.get(preset, 1)
+    if preset == "今日":
+        start_dt = today_start
+    else:
+        start_dt = today_start - timedelta(days=days - 1)
+    return _iso_datetime(start_dt), _iso_datetime(now), preset
+
+
+def render_article_time_filters() -> tuple[str | None, str | None, str]:
+    """渲染时间筛选 UI，返回当前生效的 published 范围。"""
+    init_article_time_filters()
+    use_custom = bool(st.session_state.get("article_time_use_custom"))
+
+    st.markdown('<div class="bp-time-filter-wrap">', unsafe_allow_html=True)
+    st.markdown("**发布时间筛选**")
+    if use_custom:
+        st.caption(
+            f"当前为自定义日期范围（快捷选项已暂停）。"
+            f"清空自定义后将恢复为「{st.session_state.article_time_last_preset}」。"
+        )
+        st.radio(
+            "发布时间",
+            list(ARTICLE_TIME_PRESETS),
+            index=0,
+            horizontal=True,
+            key="article_time_preset_inactive",
+            label_visibility="collapsed",
+            disabled=True,
+        )
+    else:
+        preset_index = list(ARTICLE_TIME_PRESETS).index(
+            st.session_state.get("article_time_preset", "全部")
+        )
+        st.radio(
+            "发布时间",
+            list(ARTICLE_TIME_PRESETS),
+            index=preset_index,
+            horizontal=True,
+            key="article_time_preset",
+            label_visibility="collapsed",
+            on_change=_on_time_preset_change,
+        )
+
+    with st.expander("自定义日期", expanded=use_custom):
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            st.date_input(
+                "开始日期",
+                value=None,
+                key="article_custom_start",
+                format="YYYY-MM-DD",
+            )
+        with date_col2:
+            st.date_input(
+                "结束日期",
+                value=None,
+                key="article_custom_end",
+                format="YYYY-MM-DD",
+            )
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            if st.button("应用自定义范围", key="apply_custom_date_range", use_container_width=True):
+                custom_start = st.session_state.get("article_custom_start")
+                custom_end = st.session_state.get("article_custom_end")
+                if not custom_start or not custom_end:
+                    st.warning("请选择开始日期和结束日期。")
+                else:
+                    if not use_custom:
+                        st.session_state.article_time_last_preset = st.session_state.get(
+                            "article_time_preset", "全部"
+                        )
+                    st.session_state.article_time_use_custom = True
+                    st.rerun()
+        with btn_col2:
+            if st.button("清空自定义日期", key="clear_custom_date_range", use_container_width=True):
+                st.session_state.article_time_use_custom = False
+                st.session_state.article_time_preset = (
+                    st.session_state.article_time_last_preset
+                )
+                for key in ("article_custom_start", "article_custom_end"):
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    return resolve_article_published_range()
+
+
+def render_article_list(
+    brand_name: str | None,
+    published_start: str | None = None,
+    published_end: str | None = None,
+    time_label: str = "全部",
+) -> None:
+    """渲染文章列表；收藏与时间筛选从 session_state / 参数读取。"""
+    checked = init_checked_article_ids()
+    favorites_only = bool(st.session_state.get("favorites_only_filter", False))
+    articles = db.list_articles(
+        brand_name,
+        favorites_only=favorites_only,
+        published_start=published_start,
+        published_end=published_end,
+    )
+    fav_total = db.count_favorite_articles(brand_name)
+
+    if not articles:
+        if favorites_only:
+            brand_hint = f"「{brand_name}」" if brand_name else "当前筛选范围"
+            st.info(
+                f"{brand_hint}暂无收藏文章。"
+                f"（数据库中共 {fav_total} 篇收藏；"
+                "请确认品牌筛选是否正确，或在文章末尾点击「☆ 收藏」）"
+            )
+        elif published_start and published_end:
+            brand_hint = f"「{brand_name}」" if brand_name else "当前筛选范围"
+            st.info(f"{brand_hint}在时间范围「{time_label}」内暂无文章。")
+        return
+
+    time_hint = f" · 时间范围：{time_label}" if time_label != "全部" else ""
+    if favorites_only:
+        st.caption(f"共 {len(articles)} 篇收藏文章{time_hint}")
+    else:
+        st.caption(f"共 {len(articles)} 篇文章（已收藏 {fav_total} 篇）{time_hint}")
+
+    render_article_sample_toolbar(articles)
+
+    for article in articles:
+        is_favorite = article_is_favorite(article)
+        article_id = article["id"]
+        is_picked = article_id in checked
+        pick_key = pick_checkbox_key(article_id)
+        st.session_state[pick_key] = is_picked
+        with st.container(border=True):
+            pick_col, title_col, btn_col = st.columns(
+                [0.35, 4.65, 1], vertical_alignment="center"
+            )
+            with pick_col:
+                mark_pick_checkbox_zone(is_picked)
+                st.checkbox(
+                    "选择",
+                    key=pick_key,
+                    label_visibility="collapsed",
+                    on_change=_on_pick_checkbox_change,
+                    args=(article_id,),
+                )
+            with title_col:
+                fav_badge = " ★" if is_favorite else ""
+                st.markdown(f"#### {article['title']}{fav_badge}")
+                if article.get("category"):
+                    render_category_badge(article["category"])
+                else:
+                    st.caption("未分类")
+            with btn_col:
+                mark_action_btn_zone()
+                classify_btn = st.button(
+                    "AI 分类",
+                    key=f"classify_{article['id']}",
+                    use_container_width=True,
+                    disabled=not api_configured(),
+                )
+                mark_action_btn_zone()
+                summary_btn = st.button(
+                    "生成摘要",
+                    key=f"summary_{article['id']}",
+                    use_container_width=True,
+                    disabled=not api_configured(),
+                )
+                if not api_configured():
+                    st.caption("请先配置 API Key")
+
+            st.markdown(
+                f"**品牌：** {article['brand_name']}  "
+                f"**发布时间：** {format_datetime(article['published'])}  "
+                f"**来源：** {article['source'] or '未知'}"
+            )
+            if article.get("summary"):
+                st.markdown("**原文摘要**")
+                st.write(article["summary"])
+            else:
+                st.caption("（暂无 RSS 原文摘要）")
+            if article.get("ai_summary"):
+                render_ai_summary_box(article["ai_summary"])
+            st.link_button("阅读原文", article["link"], use_container_width=False)
+
+            fav_col1, _fav_col2 = st.columns([1, 4])
+            with fav_col1:
+                mark_favorite_btn_zone(is_favorite)
+                fav_label = "★ 取消收藏" if is_favorite else "☆ 收藏"
+                if st.button(
+                    fav_label,
+                    key=f"favorite_{article['id']}",
+                    use_container_width=True,
+                ):
+                    new_state = db.toggle_article_favorite(article["id"])
+                    if new_state is None:
+                        st.warning("收藏操作失败：文章不存在。")
+                    else:
+                        st.rerun()
+
+            if classify_btn and api_configured():
+                with st.spinner("正在调用 AI 分类…"):
+                    classify_single_article(article)
+                st.rerun()
+            if summary_btn and api_configured():
+                with st.spinner("正在生成 AI 摘要…"):
+                    summarize_single_article(article)
+                st.rerun()
 
 
 def api_configured() -> bool:
@@ -1041,12 +1698,45 @@ def render_brand_management() -> None:
 
     st.subheader("已添加品牌")
     brands = db.list_brands()
+    batch_fetch_running = bool(st.session_state.get("batch_fetch_all_running", False))
+
+    mark_fetch_all_btn_zone()
+    fetch_all_clicked = st.button(
+        "🔄 一键更新全部品牌",
+        key="fetch_all_brands",
+        type="primary",
+        use_container_width=True,
+        disabled=not brands or batch_fetch_running,
+    )
     if not brands:
-        st.info("暂无品牌源，请在上方表单中添加。")
-    else:
+        st.caption("暂无品牌，请先添加。")
+    elif batch_fetch_running:
+        st.caption("正在批量采集中，请稍候…")
+
+    if fetch_all_clicked and brands:
+        st.session_state["batch_fetch_all_running"] = True
+        total_new, total_skipped, failed_brands = fetch_all_brands_content(brands)
+        st.session_state["batch_fetch_all_running"] = False
+
+        summary = f"全部完成：共新增 {total_new} 篇，跳过 {total_skipped} 篇重复"
+        if failed_brands:
+            preview = "、".join(failed_brands[:3])
+            if len(failed_brands) > 3:
+                preview += f" 等 {len(failed_brands)} 个品牌"
+            set_flash_message(
+                "warning",
+                f"{summary}。部分品牌采集失败：{preview}",
+            )
+        else:
+            set_flash_message("success", f"{summary}。")
+        st.rerun()
+
+    if brands:
         for brand in brands:
             with st.container(border=True):
-                col_info, col_fetch, col_del = st.columns([4, 1, 1])
+                col_info, col_fetch, col_del = st.columns(
+                    [3, 1, 1], vertical_alignment="center"
+                )
                 with col_info:
                     article_count = len(db.list_articles(brand["brand_name"]))
                     source_type = brand.get("source_type") or detect_source_type(
@@ -1059,7 +1749,12 @@ def render_brand_management() -> None:
                         f"采集方式：{mode_label}　|　已采集文章：{article_count} 篇"
                     )
                 with col_fetch:
-                    if st.button("立即采集", key=f"fetch_{brand['id']}", type="primary", use_container_width=True):
+                    if st.button(
+                        "立即采集",
+                        key=f"fetch_{brand['id']}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
                         with st.spinner(f"正在采集「{brand['brand_name']}」的内容…"):
                             articles, error = fetch_brand_content(
                                 brand["rss_url"],
@@ -1077,8 +1772,11 @@ def render_brand_management() -> None:
                             )
                             st.rerun()
                 with col_del:
-                    mark_delete_zone()
-                    if st.button("删除", key=f"del_{brand['id']}", use_container_width=True):
+                    if st.button(
+                        "删除",
+                        key=f"del_{brand['id']}",
+                        use_container_width=True,
+                    ):
                         deleted_name = db.delete_brand(brand["id"])
                         if deleted_name:
                             set_flash_message(
@@ -1086,13 +1784,31 @@ def render_brand_management() -> None:
                                 f"已删除品牌「{deleted_name}」及其全部文章。",
                             )
                         st.rerun()
+    else:
+        st.info("暂无品牌源，请在上方表单中添加。")
 
     st.subheader("文章列表")
     brand_names = ["全部品牌"] + [b["brand_name"] for b in brands]
-    selected_brand = st.selectbox("按品牌筛选", brand_names, key="article_filter")
+    filter_col1, filter_col2 = st.columns([3, 1], vertical_alignment="center")
+    with filter_col1:
+        selected_brand = st.selectbox("按品牌筛选", brand_names, key="article_filter")
+    with filter_col2:
+        st.checkbox("仅显示收藏", key="favorites_only_filter")
 
     filter_brand = None if selected_brand == "全部品牌" else selected_brand
-    articles = db.list_articles(filter_brand)
+    favorites_only = bool(st.session_state.get("favorites_only_filter", False))
+
+    published_start, published_end, time_label = render_article_time_filters()
+
+    schema_status = st.session_state.get("db_schema_status", {})
+    if schema_status.get("has_is_favorite_column"):
+        fav_in_scope = db.count_favorite_articles(filter_brand)
+        st.caption(
+            f"收藏字段已就绪 · 当前筛选范围内 {fav_in_scope} 篇收藏"
+        )
+    else:
+        st.error("数据库缺少 is_favorite 字段，请重启应用以完成迁移。")
+
     uncategorized = db.list_uncategorized_articles(filter_brand)
     without_ai_summary = db.list_articles_without_ai_summary(filter_brand)
 
@@ -1135,59 +1851,15 @@ def render_brand_management() -> None:
             summarize_articles_batch(without_ai_summary)
             st.rerun()
 
-    if not articles:
+    if not db.list_articles(filter_brand) and not favorites_only:
         st.info("暂无文章数据。请先添加品牌，再点击「立即采集」抓取内容。")
     else:
-        st.caption(f"共 {len(articles)} 篇文章")
-        for article in articles:
-            with st.container(border=True):
-                title_col, btn_col = st.columns([5, 1])
-                with title_col:
-                    st.markdown(f"#### {article['title']}")
-                    if article.get("category"):
-                        render_category_badge(article["category"])
-                    else:
-                        st.caption("未分类")
-                with btn_col:
-                    mark_action_btn_zone()
-                    classify_btn = st.button(
-                        "AI 分类",
-                        key=f"classify_{article['id']}",
-                        use_container_width=True,
-                        disabled=not api_configured(),
-                    )
-                    mark_action_btn_zone()
-                    summary_btn = st.button(
-                        "生成摘要",
-                        key=f"summary_{article['id']}",
-                        use_container_width=True,
-                        disabled=not api_configured(),
-                    )
-                    if not api_configured():
-                        st.caption("请先配置 API Key")
-
-                st.markdown(
-                    f"**品牌：** {article['brand_name']}  "
-                    f"**发布时间：** {format_datetime(article['published'])}  "
-                    f"**来源：** {article['source'] or '未知'}"
-                )
-                if article.get("summary"):
-                    st.markdown("**原文摘要**")
-                    st.write(article["summary"])
-                else:
-                    st.caption("（暂无 RSS 原文摘要）")
-                if article.get("ai_summary"):
-                    render_ai_summary_box(article["ai_summary"])
-                st.link_button("阅读原文", article["link"], use_container_width=False)
-
-                if classify_btn and api_configured():
-                    with st.spinner("正在调用 AI 分类…"):
-                        classify_single_article(article)
-                    st.rerun()
-                if summary_btn and api_configured():
-                    with st.spinner("正在生成 AI 摘要…"):
-                        summarize_single_article(article)
-                    st.rerun()
+        render_article_list(
+            filter_brand,
+            published_start=published_start,
+            published_end=published_end,
+            time_label=time_label,
+        )
 
 
 def render_tone_analysis_cards(brand_name: str, result: dict, article_count: int) -> None:
@@ -1266,12 +1938,14 @@ def render_brand_comparison() -> None:
     brand_options = [b["brand_name"] for b in brands]
 
     st.subheader("品牌调性分析")
-    tone_col1, tone_col2 = st.columns([2, 1])
+    st.markdown(
+        '<div class="bp-style-marker bp-form-action-anchor"></div>',
+        unsafe_allow_html=True,
+    )
+    tone_col1, tone_col2 = st.columns([2, 1], vertical_alignment="center")
     with tone_col1:
         tone_brand = st.selectbox("选择要分析的品牌", brand_options, key="tone_brand_select")
     with tone_col2:
-        st.write("")
-        st.write("")
         analyze_tone_btn = st.button(
             "分析品牌调性",
             key="analyze_tone_btn",
@@ -1308,15 +1982,17 @@ def render_brand_comparison() -> None:
         return
 
     st.subheader("双品牌对比")
-    cmp_col1, cmp_col2, cmp_col3 = st.columns([2, 2, 1])
+    st.markdown(
+        '<div class="bp-style-marker bp-form-action-anchor"></div>',
+        unsafe_allow_html=True,
+    )
+    cmp_col1, cmp_col2, cmp_col3 = st.columns([2, 2, 1], vertical_alignment="center")
     with cmp_col1:
         brand_a = st.selectbox("品牌 A", brand_options, index=0, key="compare_a")
     with cmp_col2:
         default_b = 1 if len(brand_options) > 1 else 0
         brand_b = st.selectbox("品牌 B", brand_options, index=default_b, key="compare_b")
     with cmp_col3:
-        st.write("")
-        st.write("")
         start_compare_btn = st.button(
             "开始对比",
             key="start_compare_btn",
@@ -1328,32 +2004,99 @@ def render_brand_comparison() -> None:
         st.warning("请选择两个不同的品牌进行对比。")
         return
 
-    articles_a = db.list_articles(brand_a)
-    articles_b = db.list_articles(brand_b)
+    sample_ids = get_selected_sample_ids()
+    sample_count = len(sample_ids)
+    has_sample = sample_count > 0
+
+    st.markdown("**对比数据范围**")
+    if has_sample:
+        article_source = st.radio(
+            "对比数据范围",
+            ["使用全部文章", f"使用自定义样本（已选 {sample_count} 篇）"],
+            index=0,
+            key="compare_article_source",
+            label_visibility="collapsed",
+            horizontal=True,
+        )
+    else:
+        st.radio(
+            "对比数据范围",
+            ["使用全部文章", "使用自定义样本（已选 0 篇）"],
+            index=0,
+            key="compare_article_source_disabled",
+            label_visibility="collapsed",
+            horizontal=True,
+            disabled=True,
+        )
+        st.caption("请先在品牌内容管理页设置对比样本")
+        article_source = "使用全部文章"
+
+    use_sample = article_source.startswith("使用自定义样本")
+
+    articles_a, articles_b, resolve_warnings = resolve_compare_articles(
+        brand_a, brand_b, use_sample
+    )
+    for warning in resolve_warnings:
+        st.warning(warning)
 
     if start_compare_btn:
-        if not articles_a or not articles_b:
+        if use_sample and not sample_ids:
+            st.warning("尚未设置对比样本，请先在品牌内容管理页勾选文章并设为对比样本。")
+        elif not use_sample and (not articles_a or not articles_b):
             st.warning("两个品牌均需有文章数据才能对比，请先采集 RSS。")
+        elif use_sample and not articles_a and not articles_b:
+            st.warning("当前样本范围内没有可用于对比的文章。")
         else:
-            with st.spinner(f"正在对比「{brand_a}」与「{brand_b}」…"):
+            spinner_msg = (
+                f"正在对比「{brand_a}」与「{brand_b}」（部分品牌无样本文章）…"
+                if use_sample and (not articles_a or not articles_b)
+                else f"正在对比「{brand_a}」与「{brand_b}」…"
+            )
+            with st.spinner(spinner_msg):
                 st.session_state.brand_compare_data = build_comparison_data(
-                    brand_a, brand_b, articles_a, articles_b
+                    brand_a,
+                    brand_b,
+                    articles_a,
+                    articles_b,
+                    article_ids=sample_ids if use_sample else None,
                 )
+                st.session_state["compare_use_sample"] = use_sample
 
     compare_data = st.session_state.get("brand_compare_data")
     if (
         compare_data
         and compare_data.get("brand_a") == brand_a
         and compare_data.get("brand_b") == brand_b
+        and compare_data.get("use_sample") == use_sample
     ):
-        render_dual_brand_comparison_results(compare_data)
+        render_dual_brand_comparison_results(
+            compare_data,
+            articles_a=articles_a if use_sample else None,
+            articles_b=articles_b if use_sample else None,
+            use_sample=use_sample,
+        )
     elif not start_compare_btn:
         st.caption("选择品牌 A、品牌 B 后，点击「开始对比」查看分析图表。")
 
 
-def render_dual_brand_comparison_results(data: dict) -> None:
+def render_dual_brand_comparison_results(
+    data: dict,
+    *,
+    articles_a: list[dict] | None = None,
+    articles_b: list[dict] | None = None,
+    use_sample: bool = False,
+) -> None:
     brand_a = data["brand_a"]
     brand_b = data["brand_b"]
+
+    if use_sample:
+        st.caption(
+            f"当前使用自定义样本（共 {data.get('sample_count') or 0} 篇）进行统计与图表展示。"
+        )
+        if data["articles_a_count"] == 0:
+            st.warning(f"样本中无「{brand_a}」的文章。")
+        if data["articles_b_count"] == 0:
+            st.warning(f"样本中无「{brand_b}」的文章。")
 
     metric_col1, metric_col2, metric_col3 = st.columns(3)
     with metric_col1:
@@ -1414,8 +2157,17 @@ def render_dual_brand_comparison_results(data: dict) -> None:
 
     with st.container(border=True):
         st.markdown("#### 📂 主题分布对比")
-        st.caption("基于各品牌的「分析品牌调性」结果，对比内容主题结构差异。")
-        render_topic_distribution_comparison(brand_a, brand_b)
+        if use_sample:
+            st.caption("基于样本文章的 AI 分类统计，对比内容主题结构差异。")
+        else:
+            st.caption("基于各品牌的「分析品牌调性」结果，对比内容主题结构差异。")
+        render_topic_distribution_comparison(
+            brand_a,
+            brand_b,
+            articles_a=articles_a,
+            articles_b=articles_b,
+            use_sample=use_sample,
+        )
 
     kw = data["keywords"]
     with st.container(border=True):
@@ -1464,22 +2216,29 @@ def render_dual_brand_comparison_results(data: dict) -> None:
                 f"基于当前对比数据，分析「{brand_b}」相对「{brand_a}」的内容策略差距。"
             )
 
-    gap_cache_key = f"{brand_a}__{brand_b}"
+    gap_cache_key = f"{brand_a}__{brand_b}__{'sample' if use_sample else 'all'}"
     if gap_btn and api_configured():
-        with st.spinner(f"正在生成「{brand_a}」与「{brand_b}」的差距分析…"):
-            articles_a = db.list_articles(brand_a)
-            articles_b = db.list_articles(brand_b)
-            gap_result, gap_error = generate_gap_analysis(
-                brand_a, brand_b, data, articles_a, articles_b
-            )
-        if gap_error:
-            st.warning(gap_error)
+        gap_articles_a, gap_articles_b, gap_warnings = resolve_compare_articles(
+            brand_a, brand_b, use_sample
+        )
+        for warning in gap_warnings:
+            st.warning(warning)
+        if not gap_articles_a or not gap_articles_b:
+            st.warning("两个品牌均需有文章数据才能生成差距分析。")
         else:
-            st.session_state.gap_analysis_result = {
-                "key": gap_cache_key,
-                "result": gap_result,
-            }
-            render_gap_analysis_cards(gap_result)
+            with st.spinner(f"正在生成「{brand_a}」与「{brand_b}」的差距分析…"):
+                gap_result, gap_error = generate_gap_analysis(
+                    brand_a, brand_b, data, gap_articles_a, gap_articles_b
+                )
+            if gap_error:
+                st.warning(gap_error)
+            else:
+                st.session_state.gap_analysis_result = {
+                    "key": gap_cache_key,
+                    "result": gap_result,
+                    "use_sample": use_sample,
+                }
+                render_gap_analysis_cards(gap_result)
     else:
         cached_gap = st.session_state.get("gap_analysis_result")
         if cached_gap and cached_gap.get("key") == gap_cache_key:
@@ -1602,6 +2361,13 @@ def render_strategy_generation() -> None:
             "此处将自动引用分析结果生成更精准的内容策略。"
         )
 
+    gap_use_sample = bool(
+        (st.session_state.get("gap_analysis_result") or {}).get("use_sample")
+    )
+    if gap_result and gap_use_sample:
+        sample_n = len(get_selected_sample_ids())
+        st.caption(f"当前差距分析基于自定义样本（已选 {sample_n} 篇）。")
+
     with st.form("strategy_form"):
         if gap_result:
             st.text_input("你的品牌（参照品牌）", value=gap_result["brand_a"], disabled=True)
@@ -1684,7 +2450,21 @@ def main() -> None:
     inject_global_css()
     render_hero_header()
 
-    db.init_db()
+    schema_status = db.init_db()
+    st.session_state["db_schema_status"] = schema_status
+    if "selected_article_ids" not in st.session_state:
+        st.session_state["selected_article_ids"] = []
+    init_checked_article_ids()
+    init_article_time_filters()
+    if not st.session_state.get("_db_schema_logged"):
+        st.session_state["_db_schema_logged"] = True
+        if schema_status.get("has_is_favorite_column"):
+            print(
+                f"[Brand Pulse] is_favorite 字段已就绪，"
+                f"数据库中共 {schema_status.get('favorite_count', 0)} 篇收藏"
+            )
+        else:
+            print("[Brand Pulse] 警告：is_favorite 字段缺失，请检查数据库迁移")
 
     page = render_sidebar_nav()
 
