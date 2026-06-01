@@ -1,8 +1,10 @@
 import html
 import json
 import os
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 import plotly.express as px
@@ -11,7 +13,16 @@ import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 import db
-from ai_classifier import classify_article
+from cached_queries import (
+    cached_article_counts_by_brand,
+    cached_count_articles_without_ai_summary,
+    cached_count_favorite_articles,
+    cached_count_uncategorized_articles,
+    cached_list_articles,
+    cached_list_brands,
+    clear_query_caches,
+)
+from ai_classifier import CATEGORIES, classify_article
 from ai_summarizer import generate_summary
 from brand_comparison import (
     build_comparison_data,
@@ -21,6 +32,7 @@ from brand_comparison import (
 from brand_tone_analyzer import analyze_brand_tone
 from content_strategy_generator import generate_content_strategy
 from gap_analyzer import generate_gap_analysis
+from competitor_activity_extractor import extract_competitor_activities
 from content_fetcher import detect_source_type, fetch_brand_content
 
 load_dotenv()
@@ -62,6 +74,178 @@ CATEGORY_STYLES = {
 
 PLOTLY_GRID = "#1E2D4A"
 PLOTLY_COLORWAY = ["#00D4FF", "#00FFAA", "#A78BFA", "#FF9F43", "#FF4757"]
+
+
+def invalidate_data_cache() -> None:
+    """数据库写入后刷新共享缓存与 st.cache_data。"""
+    clear_query_caches()
+    for key in ("brands", "brand_names", "article_counts_by_brand"):
+        st.session_state.pop(key, None)
+
+
+def ensure_shared_data_cache() -> None:
+    """页面级共享数据：品牌列表与按品牌文章计数。"""
+    if "brands" not in st.session_state:
+        st.session_state.brands = cached_list_brands()
+    if "article_counts_by_brand" not in st.session_state:
+        st.session_state.article_counts_by_brand = cached_article_counts_by_brand()
+
+
+def get_brands() -> list[dict]:
+    ensure_shared_data_cache()
+    return st.session_state.brands
+
+
+def get_brand_names() -> list[str]:
+    if "brand_names" not in st.session_state:
+        st.session_state.brand_names = ["全部品牌"] + [
+            b["brand_name"] for b in get_brands()
+        ]
+    return st.session_state.brand_names
+
+
+def get_article_counts_by_brand() -> dict[str, int]:
+    ensure_shared_data_cache()
+    return st.session_state.article_counts_by_brand
+
+
+def render_html_action_button(
+    label: str,
+    *,
+    html_id: str,
+    disabled: bool = False,
+) -> None:
+    """在列内渲染 HTML 主按钮（可见）；须再调用 wire_html_button_to_streamlit 绑定隐藏 st.button。"""
+    safe_label = html.escape(label)
+    disabled_attr = "disabled" if disabled else ""
+    cursor_style = "not-allowed; opacity: 0.45;" if disabled else "pointer;"
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;width:100%;min-height:2.5rem;">
+          <button type="button" id="{html_id}" {disabled_attr}
+            style="width:100%;height:2.5rem;line-height:2.5rem;padding:0 12px;
+            margin:0;background:{C_ACCENT};color:{C_BG};font-weight:700;border:none;
+            border-radius:6px;box-sizing:border-box;font-family:Inter,Poppins,sans-serif;
+            font-size:0.85rem;cursor:{cursor_style}">
+            {safe_label}
+          </button>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def wire_html_button_to_streamlit(html_id: str, streamlit_key: str) -> None:
+    """将 HTML 按钮点击转发到已渲染的隐藏 st.button。"""
+    html_id_js = json.dumps(html_id)
+    streamlit_key_js = json.dumps(streamlit_key)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+            const doc = window.parent.document;
+            const htmlId = {html_id_js};
+            const stKey = {streamlit_key_js};
+            function wire() {{
+                const htmlBtn = doc.getElementById(htmlId);
+                const stRoot = doc.querySelector(".st-key-" + stKey);
+                if (!htmlBtn || !stRoot) return;
+                const stBtn = stRoot.querySelector("button");
+                if (!stBtn) return;
+                if (htmlBtn.__bpHtmlBtnWired) return;
+                htmlBtn.__bpHtmlBtnWired = true;
+                htmlBtn.addEventListener("click", function (ev) {{
+                    ev.preventDefault();
+                    if (htmlBtn.disabled || stBtn.disabled) return;
+                    stBtn.click();
+                }});
+            }}
+            wire();
+            [50, 150, 400, 900, 1500].forEach(function (ms) {{ setTimeout(wire, ms); }});
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def render_hidden_streamlit_button(
+    label: str,
+    *,
+    streamlit_key: str,
+    disabled: bool = False,
+) -> bool:
+    """渲染隐藏的 st.button，供 HTML 按钮通过 JS 触发。"""
+    clicked = st.button(
+        label,
+        key=streamlit_key,
+        type="primary",
+        use_container_width=True,
+        disabled=disabled,
+    )
+    streamlit_key_js = json.dumps(streamlit_key)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+            const doc = window.parent.document;
+            const stKey = {streamlit_key_js};
+            function hide() {{
+                const root = doc.querySelector(".st-key-" + stKey);
+                if (!root) return;
+                root.style.setProperty("position", "absolute", "important");
+                root.style.setProperty("left", "-10000px", "important");
+                root.style.setProperty("width", "1px", "important");
+                root.style.setProperty("height", "1px", "important");
+                root.style.setProperty("overflow", "hidden", "important");
+                root.style.setProperty("opacity", "0", "important");
+                root.style.setProperty("pointer-events", "none", "important");
+                root.style.setProperty("margin", "0", "important");
+                root.style.setProperty("padding", "0", "important");
+            }}
+            hide();
+            [50, 150, 400, 900].forEach(function (ms) {{ setTimeout(hide, ms); }});
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+    return clicked
+
+
+def wire_select_html_button_row(select_key: str, html_button_id: str) -> None:
+    """下拉框 + HTML 按钮行：flex 居中对齐。"""
+    select_key_js = json.dumps(select_key)
+    html_id_js = json.dumps(html_button_id)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+            const doc = window.parent.document;
+            const selectKey = {select_key_js};
+            const htmlId = {html_id_js};
+            function apply() {{
+                const selRoot = doc.querySelector(".st-key-" + selectKey);
+                const htmlBtn = doc.getElementById(htmlId);
+                if (!selRoot || !htmlBtn) return;
+                const row = selRoot.closest('[data-testid="stHorizontalBlock"]');
+                if (!row) return;
+                row.style.setProperty("display", "flex", "important");
+                row.style.setProperty("align-items", "center", "important");
+                row.style.setProperty("flex-wrap", "nowrap", "important");
+                row.style.setProperty("gap", "0.75rem", "important");
+                row.querySelectorAll('[data-testid="column"]').forEach(function (col) {{
+                    col.style.setProperty("display", "flex", "important");
+                    col.style.setProperty("align-items", "center", "important");
+                }});
+            }}
+            apply();
+            [50, 150, 400, 900].forEach(function (ms) {{ setTimeout(apply, ms); }});
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def inject_global_css() -> None:
@@ -149,9 +333,7 @@ def inject_global_css() -> None:
             letter-spacing: 0.05em;
         }}
         /* 侧边栏 - 功能导航（按钮式，与 success 提示同宽） */
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button p,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button span {{
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button {{
             width: 100% !important;
             display: flex !important;
             justify-content: flex-start !important;
@@ -165,24 +347,43 @@ def inject_global_css() -> None:
             font-weight: 500 !important;
             line-height: 1.4 !important;
         }}
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"],
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] p,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] span {{
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button span {{
+            border: none !important;
+            background: transparent !important;
+            border-radius: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            width: auto !important;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] {{
             background: transparent !important;
             color: {C_TEXT_SEC} !important;
         }}
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover p,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover span {{
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"] span {{
+            color: {C_TEXT_SEC} !important;
+            -webkit-text-fill-color: {C_TEXT_SEC} !important;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover {{
             background: rgba(0, 212, 255, 0.06) !important;
             color: {C_TEXT} !important;
         }}
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"],
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] p,
-        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] span {{
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="secondary"]:hover span {{
+            color: {C_TEXT} !important;
+            -webkit-text-fill-color: {C_TEXT} !important;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] {{
             background: rgba(0, 212, 255, 0.12) !important;
             color: {C_TEXT} !important;
             border-left: 3px solid {C_ACCENT} !important;
+            font-weight: 600 !important;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] span {{
+            color: {C_TEXT} !important;
+            -webkit-text-fill-color: {C_TEXT} !important;
             font-weight: 600 !important;
         }}
         section[data-testid="stSidebar"] hr {{
@@ -256,60 +457,148 @@ def inject_global_css() -> None:
         }}
 
         /* ===== 按钮全局穿透 ===== */
+        /* 内层文字节点：禁止单独画框，避免出现「字外一圈框」 */
+        .stButton > button p, .stButton > button span,
+        .stFormSubmitButton > button p, .stFormSubmitButton > button span,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button span {{
+            border: none !important;
+            background: transparent !important;
+            border-radius: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            box-shadow: none !important;
+            outline: none !important;
+            text-shadow: none !important;
+            -webkit-text-stroke: 0 !important;
+            text-stroke: 0 !important;
+        }}
         button, button[kind],
-        .stButton > button, .stButton > button p, .stButton > button span,
-        .stFormSubmitButton > button, .stFormSubmitButton > button p, .stFormSubmitButton > button span {{
+        button:focus, button:focus-visible,
+        .stButton > button, .stButton > button:focus, .stButton > button:focus-visible,
+        .stFormSubmitButton > button,
+        .stFormSubmitButton > button:focus,
+        .stFormSubmitButton > button:focus-visible {{
             font-weight: 600 !important;
             border-radius: 6px !important;
+            outline: none !important;
+            box-shadow: none !important;
+            text-shadow: none !important;
+            -webkit-text-stroke: 0 !important;
+            text-stroke: 0 !important;
+        }}
+        .stButton > button p, .stButton > button span,
+        .stFormSubmitButton > button p, .stFormSubmitButton > button span {{
+            font-weight: inherit !important;
             -webkit-text-fill-color: currentColor !important;
         }}
+        button[kind="primary"],
         .stButton > button[kind="primary"],
-        .stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span,
-        .stFormSubmitButton > button[kind="primaryFormSubmit"],
-        .stFormSubmitButton > button[kind="primaryFormSubmit"] p,
-        .stFormSubmitButton > button[kind="primaryFormSubmit"] span {{
-            background: {C_ACCENT} !important;
+        .stFormSubmitButton > button[kind="primaryFormSubmit"] {{
+            background-color: {C_ACCENT} !important;
             color: {C_BG} !important;
-            border: none !important;
-            font-weight: 700 !important;
+            border: 2px solid {C_ACCENT} !important;
+            font-weight: bold !important;
         }}
+        .stButton > button[kind="primary"] p,
+        .stButton > button[kind="primary"] span,
+        .stButton > button[kind="primary"] div,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"] p,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"] span,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"] div {{
+            color: {C_BG} !important;
+            -webkit-text-fill-color: {C_BG} !important;
+            font-weight: bold !important;
+        }}
+        .stButton > button[kind="primary"]:not(:disabled),
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:not(:disabled) {{
+            color: {C_BG} !important;
+        }}
+        button[kind="primary"]:hover,
         .stButton > button[kind="primary"]:hover,
         .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {{
-            background: {C_ACCENT} !important;
+            background-color: {C_ACCENT} !important;
             color: {C_BG} !important;
-            box-shadow: 0 0 16px rgba(0, 212, 255, 0.55) !important;
+            border-color: {C_ACCENT} !important;
+            box-shadow: none !important;
         }}
+        .stButton > button[kind="primary"]:hover p,
+        .stButton > button[kind="primary"]:hover span,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover p,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover span {{
+            color: {C_BG} !important;
+            -webkit-text-fill-color: {C_BG} !important;
+        }}
+        button[kind="primary"]:disabled,
         .stButton > button[kind="primary"]:disabled,
         .stFormSubmitButton > button[kind="primaryFormSubmit"]:disabled {{
-            background: #1E2D4A !important;
+            background-color: #1E2D4A !important;
             color: #5A6A8A !important;
-        }}
-        .stButton > button:not([kind="primary"]),
-        .stButton > button:not([kind="primary"]) p, .stButton > button:not([kind="primary"]) span,
-        .stButton > button[kind="secondary"],
-        .stButton > button[kind="secondary"] p, .stButton > button[kind="secondary"] span {{
-            background: {C_BORDER} !important;
-            color: {C_TEXT} !important;
             border: 1px solid {C_BORDER} !important;
         }}
+        .stButton > button[kind="primary"]:disabled p,
+        .stButton > button[kind="primary"]:disabled span,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:disabled p,
+        .stFormSubmitButton > button[kind="primaryFormSubmit"]:disabled span {{
+            color: #5A6A8A !important;
+            -webkit-text-fill-color: #5A6A8A !important;
+        }}
+        button[kind="secondary"],
+        .stButton > button[kind="secondary"],
+        .stFormSubmitButton > button[kind="secondaryFormSubmit"] {{
+            background-color: transparent !important;
+            color: #8899AA !important;
+            border: 1px solid {C_BORDER} !important;
+        }}
+        .stButton > button[kind="secondary"] p,
+        .stButton > button[kind="secondary"] span,
+        .stFormSubmitButton > button[kind="secondaryFormSubmit"] p,
+        .stFormSubmitButton > button[kind="secondaryFormSubmit"] span {{
+            color: #8899AA !important;
+            -webkit-text-fill-color: #8899AA !important;
+        }}
+        button[kind="secondary"]:hover,
         .stButton > button[kind="secondary"]:hover {{
-            background: #354868 !important;
-            color: {C_TEXT} !important;
+            background-color: rgba(0, 212, 255, 0.06) !important;
+            color: {C_TEXT_SEC} !important;
             border-color: {C_ACCENT} !important;
         }}
-        .bp-action-btn-zone + div[data-testid="stButton"] > button,
-        .bp-action-btn-zone + div[data-testid="stButton"] > button p,
-        .bp-action-btn-zone + div[data-testid="stButton"] > button span {{
+        .stButton > button[kind="secondary"]:hover p,
+        .stButton > button[kind="secondary"]:hover span {{
+            color: {C_TEXT_SEC} !important;
+            -webkit-text-fill-color: {C_TEXT_SEC} !important;
+        }}
+        button[kind="secondary"]:disabled,
+        .stButton > button[kind="secondary"]:disabled {{
+            background-color: transparent !important;
+            color: #8899AA !important;
+            border: 1px solid {C_BORDER} !important;
+            opacity: 0.55 !important;
+        }}
+        .stButton > button[kind="secondary"]:disabled p,
+        .stButton > button[kind="secondary"]:disabled span {{
+            color: #8899AA !important;
+            -webkit-text-fill-color: #8899AA !important;
+        }}
+        .bp-action-btn-zone + div[data-testid="stButton"] > button {{
             background: {C_BORDER} !important;
             color: {C_ACCENT} !important;
             border: 1px solid {C_ACCENT} !important;
         }}
-        .bp-delete-zone + div[data-testid="stButton"] > button,
-        .bp-delete-zone + div[data-testid="stButton"] > button p,
-        .bp-delete-zone + div[data-testid="stButton"] > button span {{
+        .bp-action-btn-zone + div[data-testid="stButton"] > button p,
+        .bp-action-btn-zone + div[data-testid="stButton"] > button span {{
+            color: {C_ACCENT} !important;
+            -webkit-text-fill-color: {C_ACCENT} !important;
+        }}
+        .bp-delete-zone + div[data-testid="stButton"] > button {{
             background: {C_DANGER} !important;
             color: {C_TEXT} !important;
             border: none !important;
+        }}
+        .bp-delete-zone + div[data-testid="stButton"] > button p,
+        .bp-delete-zone + div[data-testid="stButton"] > button span {{
+            color: {C_TEXT} !important;
+            -webkit-text-fill-color: {C_TEXT} !important;
         }}
         /* 样式标记占位：不占垂直空间，避免按钮错位 */
         .bp-style-marker {{
@@ -323,40 +612,51 @@ def inject_global_css() -> None:
             border: none !important;
             font-size: 0 !important;
         }}
-        /* 表单行内控件垂直居中 */
+        /* 表单行：下拉框与按钮底对齐（避免标签把按钮顶到中间） */
         .bp-form-action-anchor + div[data-testid="stHorizontalBlock"] {{
-            align-items: center !important;
+            align-items: flex-end !important;
+        }}
+        .bp-form-action-anchor + div[data-testid="stHorizontalBlock"] [data-testid="column"] {{
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-end !important;
         }}
         /* 收藏按钮 */
-        .bp-favorite-active + div[data-testid="stButton"] > button,
-        .bp-favorite-active + div[data-testid="stButton"] > button p,
-        .bp-favorite-active + div[data-testid="stButton"] > button span {{
+        .bp-favorite-active + div[data-testid="stButton"] > button {{
             background: rgba(255, 193, 7, 0.12) !important;
             color: #FFC107 !important;
             border: 1px solid rgba(255, 193, 7, 0.45) !important;
             font-weight: 600 !important;
-            transition: box-shadow 0.2s ease, border-color 0.2s ease !important;
+            transition: border-color 0.2s ease !important;
         }}
-        .bp-favorite-active + div[data-testid="stButton"] > button:hover,
-        .bp-favorite-active + div[data-testid="stButton"] > button:hover p,
-        .bp-favorite-active + div[data-testid="stButton"] > button:hover span {{
-            box-shadow: 0 0 12px rgba(255, 193, 7, 0.45) !important;
+        .bp-favorite-active + div[data-testid="stButton"] > button p,
+        .bp-favorite-active + div[data-testid="stButton"] > button span {{
+            color: #FFC107 !important;
+            -webkit-text-fill-color: #FFC107 !important;
+        }}
+        .bp-favorite-active + div[data-testid="stButton"] > button:hover {{
             border-color: #FFC107 !important;
+            box-shadow: none !important;
         }}
-        .bp-favorite-inactive + div[data-testid="stButton"] > button,
-        .bp-favorite-inactive + div[data-testid="stButton"] > button p,
-        .bp-favorite-inactive + div[data-testid="stButton"] > button span {{
+        .bp-favorite-inactive + div[data-testid="stButton"] > button {{
             background: transparent !important;
             color: #5A6A8A !important;
             border: 1px solid {C_BORDER} !important;
-            transition: box-shadow 0.2s ease, color 0.2s ease, border-color 0.2s ease !important;
+            transition: color 0.2s ease, border-color 0.2s ease !important;
         }}
-        .bp-favorite-inactive + div[data-testid="stButton"] > button:hover,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button p,
+        .bp-favorite-inactive + div[data-testid="stButton"] > button span {{
+            color: #5A6A8A !important;
+            -webkit-text-fill-color: #5A6A8A !important;
+        }}
+        .bp-favorite-inactive + div[data-testid="stButton"] > button:hover {{
+            border-color: rgba(255, 193, 7, 0.5) !important;
+            box-shadow: none !important;
+        }}
         .bp-favorite-inactive + div[data-testid="stButton"] > button:hover p,
         .bp-favorite-inactive + div[data-testid="stButton"] > button:hover span {{
             color: #FFC107 !important;
-            border-color: rgba(255, 193, 7, 0.5) !important;
-            box-shadow: 0 0 10px rgba(255, 193, 7, 0.25) !important;
+            -webkit-text-fill-color: #FFC107 !important;
         }}
         /* 文章样本选择复选框 */
         .bp-pick-zone + div[data-testid="stCheckbox"] label {{
@@ -379,46 +679,41 @@ def inject_global_css() -> None:
             color: {C_ACCENT} !important;
             stroke: {C_ACCENT} !important;
         }}
-        /* 设为对比样本按钮 */
-        .bp-set-sample-zone + div[data-testid="stButton"] > button,
-        .bp-set-sample-zone + div[data-testid="stButton"] > button p,
-        .bp-set-sample-zone + div[data-testid="stButton"] > button span {{
-            background: {C_ACCENT} !important;
-            color: {C_BG} !important;
-            border: none !important;
-            font-weight: 700 !important;
-            box-shadow: 0 0 14px rgba(0, 212, 255, 0.35) !important;
-        }}
-        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover,
-        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover p,
-        .bp-set-sample-zone + div[data-testid="stButton"] > button:hover span {{
-            background: {C_ACCENT} !important;
-            color: {C_BG} !important;
-            box-shadow: 0 0 20px rgba(0, 212, 255, 0.55) !important;
-        }}
         /* 一键更新全部品牌按钮 */
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button,
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button p,
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button span {{
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button {{
             background: {C_ACCENT} !important;
             color: {C_BG} !important;
-            border: none !important;
+            border: 2px solid {C_ACCENT} !important;
             font-weight: 700 !important;
-            box-shadow: 0 0 16px rgba(0, 212, 255, 0.4) !important;
+            box-shadow: none !important;
         }}
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button p,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button span,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button div {{
+            color: {C_BG} !important;
+            -webkit-text-fill-color: {C_BG} !important;
+            font-weight: 700 !important;
+        }}
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover {{
+            background: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            border-color: {C_ACCENT} !important;
+            box-shadow: none !important;
+        }}
         .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover p,
         .bp-fetch-all-zone + div[data-testid="stButton"] > button:hover span {{
-            background: {C_ACCENT} !important;
             color: {C_BG} !important;
-            box-shadow: 0 0 22px rgba(0, 212, 255, 0.6) !important;
+            -webkit-text-fill-color: {C_BG} !important;
         }}
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled,
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled p,
-        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled span {{
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled {{
             background: rgba(0, 212, 255, 0.25) !important;
             color: rgba(11, 15, 25, 0.55) !important;
             box-shadow: none !important;
+        }}
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled p,
+        .bp-fetch-all-zone + div[data-testid="stButton"] > button:disabled span {{
+            color: rgba(11, 15, 25, 0.55) !important;
+            -webkit-text-fill-color: rgba(11, 15, 25, 0.55) !important;
         }}
         a[data-testid="stBaseLinkButton"],
         a[data-testid="stLinkButton"], [data-testid="stLinkButton"] a,
@@ -523,6 +818,120 @@ def inject_global_css() -> None:
         .bp-time-filter-wrap [data-testid="stRadio"] label[data-baseweb="radio"][aria-checked="true"] span {{
             color: {C_ACCENT} !important;
             font-weight: 600 !important;
+        }}
+        /* Tabs */
+        [data-baseweb="tab-list"] {{
+            gap: 10px !important;
+            border-bottom: 1px solid {C_BORDER} !important;
+            margin-bottom: 0.6rem !important;
+        }}
+        [data-baseweb="tab"] {{
+            background: transparent !important;
+            color: #8899AA !important;
+            border: 1px solid transparent !important;
+            border-bottom: none !important;
+            border-radius: 8px 8px 0 0 !important;
+            padding: 0.45rem 0.85rem !important;
+        }}
+        [data-baseweb="tab"][aria-selected="true"] {{
+            color: {C_ACCENT} !important;
+            border-color: {C_ACCENT} !important;
+            background: rgba(0, 212, 255, 0.08) !important;
+        }}
+        .bp-article-filter-wrap {{
+            margin: 0.25rem 0 0.75rem 0;
+        }}
+        .bp-article-filter-wrap .stSelectbox label,
+        .bp-article-filter-wrap .stCheckbox label {{
+            color: {C_TEXT_SEC} !important;
+        }}
+        /* 样本工具栏三按钮：.bp-toolbar-btn（通过 st-key-* 绑定） */
+        div[data-testid="stHorizontalBlock"]:has(.st-key-pick_all_visible):has(
+            .st-key-set_compare_sample
+        ) {{
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            gap: 0.12rem !important;
+            margin-bottom: 0.35rem !important;
+        }}
+        div[data-testid="stHorizontalBlock"]:has(.st-key-pick_all_visible):has(
+            .st-key-set_compare_sample
+        ) [data-testid="column"] {{
+            min-width: 0 !important;
+            align-self: center !important;
+        }}
+        /* 样本工具栏：三按钮统一为亮青底 + 深色字（.bp-toolbar-btn） */
+        .st-key-pick_all_visible div[data-testid="stButton"] > button,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button {{
+            height: 2.8rem !important;
+            min-height: 2.8rem !important;
+            max-height: 2.8rem !important;
+            line-height: 2.8rem !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            padding-left: 0.35rem !important;
+            padding-right: 0.35rem !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 100% !important;
+            white-space: nowrap !important;
+            font-size: 0.85rem !important;
+            font-weight: 600 !important;
+            box-sizing: border-box !important;
+            border-radius: 6px !important;
+            background-color: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            border: 2px solid {C_ACCENT} !important;
+            box-shadow: none !important;
+        }}
+        .st-key-pick_all_visible div[data-testid="stButton"] > button p,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button p,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button p,
+        .st-key-pick_all_visible div[data-testid="stButton"] > button span,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button span,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button span {{
+            white-space: nowrap !important;
+            line-height: 1 !important;
+            margin: 0 !important;
+            color: {C_BG} !important;
+            -webkit-text-fill-color: {C_BG} !important;
+            font-weight: 600 !important;
+        }}
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:hover,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:hover,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:hover {{
+            background-color: {C_ACCENT} !important;
+            color: {C_BG} !important;
+            border-color: {C_ACCENT} !important;
+            box-shadow: none !important;
+        }}
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:hover p,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:hover p,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:hover p,
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:hover span,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:hover span,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:hover span {{
+            color: {C_BG} !important;
+            -webkit-text-fill-color: {C_BG} !important;
+        }}
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:disabled,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:disabled,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:disabled {{
+            background-color: #1E2D4A !important;
+            color: #5A6A8A !important;
+            border: 1px solid {C_BORDER} !important;
+            opacity: 1 !important;
+        }}
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:disabled p,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:disabled p,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:disabled p,
+        .st-key-pick_all_visible div[data-testid="stButton"] > button:disabled span,
+        .st-key-pick_clear_visible div[data-testid="stButton"] > button:disabled span,
+        .st-key-set_compare_sample div[data-testid="stButton"] > button:disabled span {{
+            color: #5A6A8A !important;
+            -webkit-text-fill-color: #5A6A8A !important;
         }}
         input:focus, textarea:focus,
         .stTextInput input:focus, .stTextArea textarea:focus,
@@ -674,6 +1083,16 @@ def inject_global_css() -> None:
         }}
         table.bp-topics-table tbody tr:hover td {{
             background-color: #1A2438 !important;
+        }}
+        table.bp-activity-table tbody td {{
+            color: {C_TEXT} !important;
+        }}
+        table.bp-activity-table tbody td a {{
+            color: {C_ACCENT} !important;
+            text-decoration: none !important;
+        }}
+        table.bp-activity-table tbody td a:hover {{
+            text-decoration: underline !important;
         }}
 
         /* 词云图容器 */
@@ -988,25 +1407,122 @@ def pick_checkbox_key(article_id: str) -> str:
     return f"{PICK_CB_PREFIX}{article_id}"
 
 
-def init_checked_article_ids() -> set[str]:
-    """初始化并返回跨筛选持久化的勾选文章 ID 集合。"""
-    if "checked_article_ids" not in st.session_state:
-        st.session_state.checked_article_ids = set()
-    return st.session_state.checked_article_ids
+def init_checked_article_ids() -> None:
+    """初始化跨筛选持久化的勾选文章 ID 列表（session_state 存 list，避免 set 序列化问题）。"""
+    raw = st.session_state.get("checked_article_ids")
+    if raw is None:
+        st.session_state.checked_article_ids = []
+    elif isinstance(raw, set):
+        st.session_state.checked_article_ids = sorted(str(x) for x in raw if x)
+
+
+def get_checked_article_ids() -> set[str]:
+    """返回当前勾选 ID 集合（不修改 session_state 引用类型）。"""
+    init_checked_article_ids()
+    return {str(x) for x in st.session_state.checked_article_ids if x}
+
+
+def set_checked_article_ids(ids: Iterable[str]) -> None:
+    """写入勾选 ID（去重、统一为 str）。"""
+    st.session_state.checked_article_ids = sorted(
+        {str(x) for x in ids if x}
+    )
+
+
+def union_checked_article_ids(ids: Iterable[str]) -> None:
+    """将 ID 并入勾选集合（union），不覆盖已有勾选。"""
+    merged = get_checked_article_ids()
+    merged.update(str(x) for x in ids if x)
+    set_checked_article_ids(merged)
+
+
+def subtract_checked_article_ids(ids: Iterable[str]) -> None:
+    """从勾选集合移除指定 ID（仅影响传入 ID）。"""
+    remove = {str(x) for x in ids if x}
+    if not remove:
+        return
+    remaining = get_checked_article_ids() - remove
+    set_checked_article_ids(remaining)
+
+
+def sync_pick_checkbox_widgets(article_ids: Iterable[str], *, checked: bool) -> None:
+    """批量同步可见文章的复选框 widget 状态（在 on_click 回调中调用）。"""
+    for article_id in article_ids:
+        st.session_state[pick_checkbox_key(str(article_id))] = checked
 
 
 def _on_pick_checkbox_change(article_id: str) -> None:
     """复选框变更时同步更新 checked_article_ids。"""
-    checked = init_checked_article_ids()
+    article_id = str(article_id)
     key = pick_checkbox_key(article_id)
+    checked = get_checked_article_ids()
     if st.session_state.get(key):
         checked.add(article_id)
     else:
         checked.discard(article_id)
+    set_checked_article_ids(checked)
+
+
+def _on_pick_all_visible() -> None:
+    """全选当前可见文章：union 到 checked_article_ids，不覆盖已有勾选。"""
+    visible = [
+        str(x) for x in (st.session_state.get("pick_toolbar_visible_ids") or []) if x
+    ]
+    if not visible:
+        return
+    union_checked_article_ids(visible)
+    sync_pick_checkbox_widgets(visible, checked=True)
+
+
+def _on_pick_clear_visible() -> None:
+    """取消全选：仅移除当前可见文章的勾选。"""
+    visible = [
+        str(x) for x in (st.session_state.get("pick_toolbar_visible_ids") or []) if x
+    ]
+    if not visible:
+        return
+    subtract_checked_article_ids(visible)
+    sync_pick_checkbox_widgets(visible, checked=False)
+
+
+def _on_set_compare_sample() -> None:
+    """将 checked_article_ids 写入 selected_article_ids（深拷贝列表）。"""
+    picked_ids = list(get_checked_article_ids())
+    if not picked_ids:
+        st.session_state.flash_message = {
+            "level": "warning",
+            "text": "请先勾选文章。",
+        }
+        return
+
+    valid_articles = db.get_articles_by_ids(picked_ids)
+    if not valid_articles:
+        st.session_state.flash_message = {
+            "level": "warning",
+            "text": "所选文章已不存在，请重新勾选。",
+        }
+        return
+
+    valid_ids = [str(a["id"]) for a in valid_articles]
+    st.session_state.selected_article_ids = deepcopy(valid_ids)
+
+    if len(valid_ids) < len(picked_ids):
+        subtract_checked_article_ids(set(picked_ids) - set(valid_ids))
+        st.session_state.flash_message = {
+            "level": "warning",
+            "text": (
+                f"部分已选文章已不存在，已设为 {len(valid_ids)} 篇有效样本。"
+            ),
+        }
+    else:
+        st.session_state.flash_message = {
+            "level": "success",
+            "text": f"已设置对比样本：{len(valid_ids)} 篇文章",
+        }
 
 
 def get_selected_sample_ids() -> list[str]:
-    return list(st.session_state.get("selected_article_ids") or [])
+    return list(deepcopy(st.session_state.get("selected_article_ids") or []))
 
 
 def articles_to_topic_distribution(articles: list[dict]) -> list[dict]:
@@ -1026,13 +1542,76 @@ def articles_to_topic_distribution(articles: list[dict]) -> list[dict]:
     ]
 
 
+def init_compare_data_mode() -> None:
+    if "compare_data_mode" not in st.session_state:
+        st.session_state.compare_data_mode = "all"
+
+
+def _clear_compare_on_mode_change() -> None:
+    st.session_state.pop("brand_compare_data", None)
+    st.session_state.pop("gap_analysis_result", None)
+    st.session_state["compare_reclick_hint"] = True
+
+
+def _select_compare_data_mode(mode: str) -> None:
+    previous = st.session_state.get("compare_data_mode", "all")
+    st.session_state.compare_data_mode = mode
+    if previous != mode:
+        _clear_compare_on_mode_change()
+
+
+def _select_compare_mode_all() -> None:
+    _select_compare_data_mode("all")
+
+
+def _select_compare_mode_sample() -> None:
+    _select_compare_data_mode("sample")
+
+
+def render_compare_data_mode_buttons(sample_count: int) -> None:
+    """对比数据范围：primary / secondary 随 compare_data_mode 切换高亮。"""
+    init_compare_data_mode()
+    mode = st.session_state.compare_data_mode
+    sample_btn_disabled = mode == "sample" and sample_count == 0
+
+    st.markdown("**对比数据范围**")
+    mode_col1, mode_col2 = st.columns(2)
+    with mode_col1:
+        st.button(
+            "📊 使用全部文章",
+            key="compare_mode_all_btn",
+            type="primary" if mode == "all" else "secondary",
+            use_container_width=True,
+            on_click=_select_compare_mode_all,
+        )
+    with mode_col2:
+        sample_label = "📋 使用自定义样本"
+        if sample_count > 0:
+            sample_label = f"📋 使用自定义样本（{sample_count} 篇）"
+        st.button(
+            sample_label,
+            key="compare_mode_sample_btn",
+            type="primary" if mode == "sample" and not sample_btn_disabled else "secondary",
+            use_container_width=True,
+            disabled=sample_btn_disabled,
+            on_click=_select_compare_mode_sample,
+        )
+
+    if st.session_state.pop("compare_reclick_hint", False):
+        st.info("对比数据范围已切换，请重新点击「开始对比」。")
+
+
 def resolve_compare_articles(
     brand_a: str, brand_b: str, use_sample: bool
 ) -> tuple[list[dict], list[dict], list[str]]:
     """解析对比用文章列表；返回 (articles_a, articles_b, warnings)。"""
     warnings: list[str] = []
     if not use_sample:
-        return db.list_articles(brand_a), db.list_articles(brand_b), warnings
+        return (
+            cached_list_articles(brand_a, False, None, None, None),
+            cached_list_articles(brand_b, False, None, None, None),
+            warnings,
+        )
 
     sample_ids = get_selected_sample_ids()
     if not sample_ids:
@@ -1058,13 +1637,6 @@ def mark_pick_checkbox_zone(checked: bool) -> None:
     css_class = "bp-pick-checked" if checked else "bp-pick-unchecked"
     st.markdown(
         f'<div class="bp-style-marker {css_class} bp-pick-zone"></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def mark_set_sample_btn_zone() -> None:
-    st.markdown(
-        '<div class="bp-style-marker bp-set-sample-zone"></div>',
         unsafe_allow_html=True,
     )
 
@@ -1125,67 +1697,53 @@ def fetch_all_brands_content(brands: list[dict]) -> tuple[int, int, list[str]]:
     return total_new, total_skipped, failed_brands
 
 
-def render_article_sample_toolbar(visible_articles: list[dict]) -> None:
-    """文章样本选择工具栏：全选、取消全选、设为对比样本、已选计数。"""
-    checked = init_checked_article_ids()
-    picked_count = len(checked)
+def _render_article_sample_toolbar_body() -> None:
+    """样本工具栏 UI（由 fragment 包裹，减轻全页重跑）。"""
+    init_checked_article_ids()
+    picked_count = len(get_checked_article_ids())
     sample_count = len(get_selected_sample_ids())
-    visible_ids = {article["id"] for article in visible_articles}
+    visible_count = len(st.session_state.get("pick_toolbar_visible_ids") or [])
 
-    left_col, sample_col = st.columns([3, 1], vertical_alignment="center")
-    with left_col:
-        pick_col1, pick_col2 = st.columns([1, 1], vertical_alignment="center")
-        with pick_col1:
-            if st.button(
-                "全选当前显示文章",
-                key="pick_all_visible",
-                use_container_width=True,
-            ):
-                checked.update(visible_ids)
-                st.rerun()
-        with pick_col2:
-            if st.button(
-                "取消全选",
-                key="pick_clear_visible",
-                use_container_width=True,
-            ):
-                checked.difference_update(visible_ids)
-                st.rerun()
-    with sample_col:
-        if st.button(
-            "将选中文章设为对比样本",
-            key="set_compare_sample",
-            type="primary",
+    col1, col2, col3 = st.columns([1, 1, 1], vertical_alignment="center")
+    with col1:
+        st.button(
+            "☑ 全选",
+            key="pick_all_visible",
             use_container_width=True,
-        ):
-            picked_ids = list(checked)
-            if not picked_ids:
-                st.warning("请先勾选文章。")
-            else:
-                valid_articles = db.get_articles_by_ids(picked_ids)
-                if not valid_articles:
-                    st.warning("所选文章已不存在，请重新勾选。")
-                else:
-                    st.session_state["selected_article_ids"] = [
-                        a["id"] for a in valid_articles
-                    ]
-                    if len(valid_articles) < len(picked_ids):
-                        set_flash_message(
-                            "warning",
-                            f"部分已选文章已不存在，已设为 {len(valid_articles)} 篇有效样本。",
-                        )
-                        checked.intersection_update({a["id"] for a in valid_articles})
-                    else:
-                        set_flash_message(
-                            "success",
-                            f"已设置对比样本：{len(valid_articles)} 篇文章",
-                        )
-                    st.rerun()
+            disabled=visible_count == 0,
+            on_click=_on_pick_all_visible,
+            help="全选当前筛选下列表中的所有文章（累加至已勾选）",
+        )
+    with col2:
+        st.button(
+            "✕ 取消",
+            key="pick_clear_visible",
+            use_container_width=True,
+            disabled=visible_count == 0,
+            on_click=_on_pick_clear_visible,
+            help="取消当前筛选下列表中的勾选（保留其他筛选下已勾选的文章）",
+        )
+    with col3:
+        st.button(
+            "📌 设为样本",
+            key="set_compare_sample",
+            use_container_width=True,
+            disabled=picked_count == 0,
+            on_click=_on_set_compare_sample,
+            help="将当前所有勾选的文章设为品牌对比页的自定义样本",
+        )
 
     status_hint = f"已选择 {picked_count} 篇文章"
+    if visible_count:
+        status_hint += f"（当前列表 {visible_count} 篇，全选将累加勾选）"
     if sample_count:
         status_hint += f" · 当前对比样本：{sample_count} 篇（可在品牌对比页选用）"
     st.caption(status_hint)
+
+
+def render_article_sample_toolbar() -> None:
+    """文章样本选择工具栏（依赖 session_state.pick_toolbar_visible_ids）。"""
+    _render_article_sample_toolbar_body()
 
 
 def mark_action_btn_zone() -> None:
@@ -1209,6 +1767,7 @@ def article_is_favorite(article: dict) -> bool:
 
 
 ARTICLE_TIME_PRESETS = ("全部", "今日", "3日内", "7日内", "30日内")
+ARTICLE_CATEGORY_FILTER_OPTIONS = ("全部主题",) + CATEGORIES + ("未分类",)
 
 
 def init_article_time_filters() -> None:
@@ -1233,6 +1792,25 @@ def _iso_datetime(value: datetime) -> str:
     return value.isoformat(timespec="seconds")
 
 
+def published_range_for_preset(preset: str) -> tuple[str | None, str | None, str]:
+    """
+    根据快捷时间选项计算 published 范围。
+    返回 (published_start, published_end, 显示标签)。
+    """
+    if preset == "全部":
+        return None, None, "全部"
+
+    now = datetime.now()
+    today_start = datetime.combine(now.date(), time.min)
+    preset_days = {"今日": 1, "3日内": 3, "7日内": 7, "30日内": 30}
+    days = preset_days.get(preset, 1)
+    if preset == "今日":
+        start_dt = today_start
+    else:
+        start_dt = today_start - timedelta(days=days - 1)
+    return _iso_datetime(start_dt), _iso_datetime(now), preset
+
+
 def resolve_article_published_range() -> tuple[str | None, str | None, str]:
     """
     解析当前时间筛选范围。
@@ -1252,27 +1830,76 @@ def resolve_article_published_range() -> tuple[str | None, str | None, str]:
             return _iso_datetime(start_dt), _iso_datetime(end_dt), label
 
     preset = st.session_state.get("article_time_preset", "全部")
-    if preset == "全部":
-        return None, None, "全部"
-
-    now = datetime.now()
-    today_start = datetime.combine(now.date(), time.min)
-    preset_days = {"今日": 1, "3日内": 3, "7日内": 7, "30日内": 30}
-    days = preset_days.get(preset, 1)
-    if preset == "今日":
-        start_dt = today_start
-    else:
-        start_dt = today_start - timedelta(days=days - 1)
-    return _iso_datetime(start_dt), _iso_datetime(now), preset
+    return published_range_for_preset(preset)
 
 
-def render_article_time_filters() -> tuple[str | None, str | None, str]:
+def init_activity_extract_time() -> None:
+    if "activity_extract_time_preset" not in st.session_state:
+        st.session_state.activity_extract_time_preset = "7日内"
+
+
+def init_article_category_filter() -> None:
+    if "article_category_filter" not in st.session_state:
+        st.session_state.article_category_filter = "全部主题"
+
+
+def init_article_brand_filter() -> None:
+    if "article_filter" not in st.session_state:
+        st.session_state.article_filter = "全部品牌"
+
+
+def resolve_category_db_param(selected: str) -> str | None:
+    """将主题筛选项转为 list_articles 的 category 参数。"""
+    if selected == "全部主题":
+        return None
+    return selected
+
+
+def get_article_list_query_params() -> dict:
+    """读取当前文章筛选条件，供 list_articles 使用。"""
+    init_article_brand_filter()
+    init_article_category_filter()
+    init_article_time_filters()
+    selected_brand = st.session_state.get("article_filter", "全部品牌")
+    brand_name = None if selected_brand == "全部品牌" else selected_brand
+    category = resolve_category_db_param(
+        st.session_state.get("article_category_filter", "全部主题")
+    )
+    published_start, published_end, time_label = resolve_article_published_range()
+    return {
+        "brand_name": brand_name,
+        "category": category,
+        "favorites_only": bool(st.session_state.get("favorites_only_filter", False)),
+        "published_start": published_start,
+        "published_end": published_end,
+        "time_label": time_label,
+    }
+
+
+def fetch_filtered_articles() -> tuple[list[dict], dict]:
+    """按当前筛选条件查询文章（60 秒缓存）。"""
+    params = get_article_list_query_params()
+    articles = cached_list_articles(
+        params["brand_name"],
+        params["favorites_only"],
+        params["published_start"],
+        params["published_end"],
+        params["category"],
+    )
+    return articles, params
+
+
+def render_article_time_filters(*, compact: bool = False) -> tuple[str | None, str | None, str]:
     """渲染时间筛选 UI，返回当前生效的 published 范围。"""
     init_article_time_filters()
     use_custom = bool(st.session_state.get("article_time_use_custom"))
 
-    st.markdown('<div class="bp-time-filter-wrap">', unsafe_allow_html=True)
-    st.markdown("**发布时间筛选**")
+    wrap_class = "bp-time-filter-wrap"
+    if compact:
+        wrap_class += " bp-article-filter-time"
+    st.markdown(f'<div class="{wrap_class}">', unsafe_allow_html=True)
+    if not compact:
+        st.markdown("**发布时间筛选**")
     if use_custom:
         st.caption(
             f"当前为自定义日期范围（快捷选项已暂停）。"
@@ -1346,50 +1973,93 @@ def render_article_time_filters() -> tuple[str | None, str | None, str]:
     return resolve_article_published_range()
 
 
-def render_article_list(
-    brand_name: str | None,
-    published_start: str | None = None,
-    published_end: str | None = None,
-    time_label: str = "全部",
-) -> None:
-    """渲染文章列表；收藏与时间筛选从 session_state / 参数读取。"""
-    checked = init_checked_article_ids()
-    favorites_only = bool(st.session_state.get("favorites_only_filter", False))
-    articles = db.list_articles(
-        brand_name,
-        favorites_only=favorites_only,
-        published_start=published_start,
-        published_end=published_end,
+def render_unified_article_filters(brand_names: list[str]) -> None:
+    """文章管理 Tab 统一筛选栏：品牌、主题、时间、收藏。"""
+    init_article_brand_filter()
+    init_article_category_filter()
+    init_article_time_filters()
+    st.markdown('<div class="bp-article-filter-wrap">', unsafe_allow_html=True)
+    st.caption("筛选条件")
+    filter_row1_col1, filter_row1_col2, filter_row1_col3 = st.columns(
+        [1.1, 1.1, 1.8], vertical_alignment="top"
     )
-    fav_total = db.count_favorite_articles(brand_name)
+    with filter_row1_col1:
+        st.selectbox(
+            "品牌",
+            brand_names,
+            key="article_filter",
+        )
+    with filter_row1_col2:
+        st.selectbox(
+            "主题",
+            list(ARTICLE_CATEGORY_FILTER_OPTIONS),
+            key="article_category_filter",
+        )
+    with filter_row1_col3:
+        render_article_time_filters(compact=True)
+    st.checkbox("仅显示收藏", key="favorites_only_filter")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if not articles:
-        if favorites_only:
-            brand_hint = f"「{brand_name}」" if brand_name else "当前筛选范围"
-            st.info(
-                f"{brand_hint}暂无收藏文章。"
-                f"（数据库中共 {fav_total} 篇收藏；"
-                "请确认品牌筛选是否正确，或在文章末尾点击「☆ 收藏」）"
-            )
-        elif published_start and published_end:
-            brand_hint = f"「{brand_name}」" if brand_name else "当前筛选范围"
-            st.info(f"{brand_hint}在时间范围「{time_label}」内暂无文章。")
-        return
+
+def render_article_list_empty_hint(params: dict) -> None:
+    """无文章时的提示文案。"""
+    brand_name = params["brand_name"]
+    favorites_only = params["favorites_only"]
+    published_start = params["published_start"]
+    published_end = params["published_end"]
+    time_label = params["time_label"]
+    category = params["category"]
+    fav_total = cached_count_favorite_articles(brand_name)
+
+    brand_hint = f"「{brand_name}」" if brand_name else "当前筛选范围"
+    hints: list[str] = []
+    if category:
+        hints.append(f"主题「{category}」")
+    if time_label != "全部":
+        hints.append(f"时间「{time_label}」")
+    if favorites_only:
+        hints.append("仅收藏")
+    scope = brand_hint + (" · " + " · ".join(hints) if hints else "")
+
+    if favorites_only:
+        st.info(
+            f"{scope}暂无符合条件的收藏文章。"
+            f"（该品牌下共 {fav_total} 篇收藏；可调整筛选或点击「☆ 收藏」）"
+        )
+    elif (published_start and published_end) or category:
+        st.info(f"{scope}暂无符合条件的文章，请调整筛选条件或先采集内容。")
+    else:
+        st.info("暂无文章数据。请先添加品牌，再点击「立即采集」抓取内容。")
+
+
+def render_article_cards(articles: list[dict], *, params: dict) -> None:
+    """渲染文章卡片列表（不含筛选栏与样本工具栏）。"""
+    init_checked_article_ids()
+    checked = get_checked_article_ids()
+    brand_name = params["brand_name"]
+    favorites_only = params["favorites_only"]
+    time_label = params["time_label"]
+    fav_total = cached_count_favorite_articles(brand_name)
 
     time_hint = f" · 时间范围：{time_label}" if time_label != "全部" else ""
+    category = params.get("category")
+    category_hint = f" · 主题：{category}" if category else ""
     if favorites_only:
-        st.caption(f"共 {len(articles)} 篇收藏文章{time_hint}")
+        st.caption(f"共 {len(articles)} 篇收藏文章{category_hint}{time_hint}")
     else:
-        st.caption(f"共 {len(articles)} 篇文章（已收藏 {fav_total} 篇）{time_hint}")
-
-    render_article_sample_toolbar(articles)
+        st.caption(
+            f"共 {len(articles)} 篇文章（已收藏 {fav_total} 篇）{category_hint}{time_hint}"
+        )
 
     for article in articles:
         is_favorite = article_is_favorite(article)
-        article_id = article["id"]
+        article_id = str(article["id"])
         is_picked = article_id in checked
         pick_key = pick_checkbox_key(article_id)
-        st.session_state[pick_key] = is_picked
+        if pick_key not in st.session_state:
+            st.session_state[pick_key] = is_picked
+        elif bool(st.session_state[pick_key]) != is_picked:
+            st.session_state[pick_key] = is_picked
         with st.container(border=True):
             pick_col, title_col, btn_col = st.columns(
                 [0.35, 4.65, 1], vertical_alignment="center"
@@ -1455,6 +2125,7 @@ def render_article_list(
                     if new_state is None:
                         st.warning("收藏操作失败：文章不存在。")
                     else:
+                        invalidate_data_cache()
                         st.rerun()
 
             if classify_btn and api_configured():
@@ -1465,6 +2136,36 @@ def render_article_list(
                 with st.spinner("正在生成 AI 摘要…"):
                     summarize_single_article(article)
                 st.rerun()
+
+
+def _render_article_list_body(articles: list[dict], params: dict) -> None:
+    """样本工具栏 + 文章列表（与筛选联动，可在 fragment 内局部重跑）。"""
+    show_flash_message()
+    render_article_sample_toolbar()
+    if not articles:
+        render_article_list_empty_hint(params)
+    else:
+        render_article_cards(articles, params=params)
+
+
+def render_article_list_section(brand_names: list[str]) -> None:
+    """文章列表区：筛选栏 → 样本工具栏 → 列表。"""
+    render_unified_article_filters(brand_names)
+    articles, params = fetch_filtered_articles()
+    st.session_state.pick_toolbar_visible_ids = [
+        str(article["id"]) for article in articles if article.get("id")
+    ]
+
+    fragment = getattr(st, "fragment", None)
+    if fragment is not None:
+
+        @fragment
+        def _article_list_fragment() -> None:
+            _render_article_list_body(articles, params)
+
+        _article_list_fragment()
+    else:
+        _render_article_list_body(articles, params)
 
 
 def api_configured() -> bool:
@@ -1531,6 +2232,10 @@ def render_ai_summary_box(ai_summary: str) -> None:
 
 
 def classify_single_article(article: dict) -> bool:
+    existing = str(article.get("category") or "").strip()
+    if existing:
+        set_flash_message("success", f"文章已有分类「{existing}」：{article['title'][:40]}")
+        return True
     category, error = classify_article(
         article["title"], article_content_for_ai(article)
     )
@@ -1538,6 +2243,7 @@ def classify_single_article(article: dict) -> bool:
         set_flash_message("warning", f"「{article['title'][:30]}…」分类失败：{error}")
         return False
     db.update_article_category(article["id"], category)
+    invalidate_data_cache()
     set_flash_message("success", f"已分类为「{category}」：{article['title'][:40]}")
     return True
 
@@ -1555,6 +2261,9 @@ def classify_articles_batch(articles: list[dict]) -> tuple[int, int]:
     for index, article in enumerate(articles, start=1):
         status_text.caption(f"正在分类 {index}/{total}…")
         progress_bar.progress(index / total, text=f"正在分类 {index}/{total}…")
+        if str(article.get("category") or "").strip():
+            success_count += 1
+            continue
         category, error = classify_article(
             article["title"], article_content_for_ai(article)
         )
@@ -1566,6 +2275,9 @@ def classify_articles_batch(articles: list[dict]) -> tuple[int, int]:
 
     progress_bar.empty()
     status_text.empty()
+
+    if success_count:
+        invalidate_data_cache()
 
     if failed_titles:
         preview = "、".join(failed_titles[:3])
@@ -1581,6 +2293,10 @@ def classify_articles_batch(articles: list[dict]) -> tuple[int, int]:
 
 
 def summarize_single_article(article: dict) -> bool:
+    existing = str(article.get("ai_summary") or "").strip()
+    if existing:
+        set_flash_message("success", f"文章已有 AI 摘要：{article['title'][:40]}")
+        return True
     ai_summary, error = generate_summary(
         article["title"], article.get("summary") or ""
     )
@@ -1588,6 +2304,7 @@ def summarize_single_article(article: dict) -> bool:
         set_flash_message("warning", f"「{article['title'][:30]}…」摘要生成失败：{error}")
         return False
     db.update_article_ai_summary(article["id"], ai_summary)
+    invalidate_data_cache()
     set_flash_message("success", f"已生成 AI 摘要：{article['title'][:40]}")
     return True
 
@@ -1605,6 +2322,9 @@ def summarize_articles_batch(articles: list[dict]) -> tuple[int, int]:
     for index, article in enumerate(articles, start=1):
         status_text.caption(f"正在生成摘要 {index}/{total}…")
         progress_bar.progress(index / total, text=f"正在生成摘要 {index}/{total}…")
+        if str(article.get("ai_summary") or "").strip():
+            success_count += 1
+            continue
         ai_summary, error = generate_summary(
             article["title"], article.get("summary") or ""
         )
@@ -1616,6 +2336,9 @@ def summarize_articles_batch(articles: list[dict]) -> tuple[int, int]:
 
     progress_bar.empty()
     status_text.empty()
+
+    if success_count:
+        invalidate_data_cache()
 
     if failed_titles:
         preview = "、".join(failed_titles[:3])
@@ -1688,6 +2411,7 @@ def render_brand_management() -> None:
                     st.error("该品牌名称已存在，请使用其他名称。")
                 else:
                     db.add_brand(brand_name, source_url)
+                    invalidate_data_cache()
                     detected = detect_source_type(source_url.strip())
                     mode_label = "RSS" if detected == "rss" else "网页"
                     set_flash_message(
@@ -1697,17 +2421,22 @@ def render_brand_management() -> None:
                     st.rerun()
 
     st.subheader("已添加品牌")
-    brands = db.list_brands()
+    brands = get_brands()
+    article_counts = get_article_counts_by_brand()
     batch_fetch_running = bool(st.session_state.get("batch_fetch_all_running", False))
+    init_activity_extract_time()
 
-    mark_fetch_all_btn_zone()
-    fetch_all_clicked = st.button(
-        "🔄 一键更新全部品牌",
-        key="fetch_all_brands",
-        type="primary",
-        use_container_width=True,
-        disabled=not brands or batch_fetch_running,
-    )
+    fetch_col, _spacer_col = st.columns([1, 2], vertical_alignment="center")
+    with fetch_col:
+        mark_fetch_all_btn_zone()
+        fetch_all_clicked = st.button(
+            "🔄 一键更新全部品牌",
+            key="fetch_all_brands",
+            type="primary",
+            use_container_width=True,
+            disabled=not brands or batch_fetch_running,
+        )
+
     if not brands:
         st.caption("暂无品牌，请先添加。")
     elif batch_fetch_running:
@@ -1729,6 +2458,7 @@ def render_brand_management() -> None:
             )
         else:
             set_flash_message("success", f"{summary}。")
+        invalidate_data_cache()
         st.rerun()
 
     if brands:
@@ -1738,7 +2468,7 @@ def render_brand_management() -> None:
                     [3, 1, 1], vertical_alignment="center"
                 )
                 with col_info:
-                    article_count = len(db.list_articles(brand["brand_name"]))
+                    article_count = article_counts.get(brand["brand_name"], 0)
                     source_type = brand.get("source_type") or detect_source_type(
                         brand["rss_url"]
                     )
@@ -1765,6 +2495,7 @@ def render_brand_management() -> None:
                             st.warning(error)
                         else:
                             new_count, skipped_count = db.save_articles(articles)
+                            invalidate_data_cache()
                             set_flash_message(
                                 "success",
                                 f"「{brand['brand_name']}」采集完成：新增 {new_count} 篇，"
@@ -1779,6 +2510,7 @@ def render_brand_management() -> None:
                     ):
                         deleted_name = db.delete_brand(brand["id"])
                         if deleted_name:
+                            invalidate_data_cache()
                             set_flash_message(
                                 "success",
                                 f"已删除品牌「{deleted_name}」及其全部文章。",
@@ -1787,79 +2519,134 @@ def render_brand_management() -> None:
     else:
         st.info("暂无品牌源，请在上方表单中添加。")
 
-    st.subheader("文章列表")
-    brand_names = ["全部品牌"] + [b["brand_name"] for b in brands]
-    filter_col1, filter_col2 = st.columns([3, 1], vertical_alignment="center")
-    with filter_col1:
-        selected_brand = st.selectbox("按品牌筛选", brand_names, key="article_filter")
-    with filter_col2:
-        st.checkbox("仅显示收藏", key="favorites_only_filter")
+    st.divider()
+    tab_articles, tab_activities = st.tabs(["📰 文章管理", "📢 竞品活动"])
 
-    filter_brand = None if selected_brand == "全部品牌" else selected_brand
-    favorites_only = bool(st.session_state.get("favorites_only_filter", False))
+    with tab_articles:
+        st.subheader("文章列表")
+        brand_names = get_brand_names()
+        init_article_brand_filter()
+        init_article_category_filter()
 
-    published_start, published_end, time_label = render_article_time_filters()
+        filter_brand = get_article_list_query_params()["brand_name"]
 
-    schema_status = st.session_state.get("db_schema_status", {})
-    if schema_status.get("has_is_favorite_column"):
-        fav_in_scope = db.count_favorite_articles(filter_brand)
-        st.caption(
-            f"收藏字段已就绪 · 当前筛选范围内 {fav_in_scope} 篇收藏"
-        )
-    else:
-        st.error("数据库缺少 is_favorite 字段，请重启应用以完成迁移。")
-
-    uncategorized = db.list_uncategorized_articles(filter_brand)
-    without_ai_summary = db.list_articles_without_ai_summary(filter_brand)
-
-    tool_col1, tool_col2, tool_col3 = st.columns([1, 1, 2])
-    with tool_col1:
-        batch_classify_btn = st.button(
-            "一键全部分类",
-            key="batch_classify_btn",
-            type="primary",
-            use_container_width=True,
-            disabled=not api_configured(),
-        )
-    with tool_col2:
-        batch_summary_btn = st.button(
-            "一键生成所有摘要",
-            key="batch_summary_btn",
-            type="primary",
-            use_container_width=True,
-            disabled=not api_configured(),
-        )
-    with tool_col3:
-        if not api_configured():
-            st.caption("请先配置 API Key（在 `.env` 中设置 `DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL`）。")
+        schema_status = st.session_state.get("db_schema_status", {})
+        if schema_status.get("has_is_favorite_column"):
+            fav_in_scope = cached_count_favorite_articles(filter_brand)
+            st.caption(f"收藏字段已就绪 · 当前品牌范围内 {fav_in_scope} 篇收藏")
         else:
-            st.caption(
-                f"待分类：{len(uncategorized)} 篇　|　待生成 AI 摘要：{len(without_ai_summary)} 篇"
+            st.error("数据库缺少 is_favorite 字段，请重启应用以完成迁移。")
+
+        uncategorized_count = cached_count_uncategorized_articles(filter_brand)
+        without_ai_summary_count = cached_count_articles_without_ai_summary(filter_brand)
+
+        tool_col1, tool_col2, tool_col3 = st.columns([1, 1, 2])
+        with tool_col1:
+            batch_classify_btn = st.button(
+                "一键全部分类",
+                key="batch_classify_btn",
+                type="primary",
+                use_container_width=True,
+                disabled=not api_configured(),
             )
+        with tool_col2:
+            batch_summary_btn = st.button(
+                "一键生成所有摘要",
+                key="batch_summary_btn",
+                type="primary",
+                use_container_width=True,
+                disabled=not api_configured(),
+            )
+        with tool_col3:
+            if not api_configured():
+                st.caption("请先配置 API Key（在 `.env` 中设置 `DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL`）。")
+            else:
+                st.caption(
+                    f"待分类：{uncategorized_count} 篇　|　待生成 AI 摘要：{without_ai_summary_count} 篇"
+                )
 
-    if batch_classify_btn and api_configured():
-        if not uncategorized:
-            st.warning("当前没有未分类的文章。")
-        else:
-            classify_articles_batch(uncategorized)
-            st.rerun()
+        if batch_classify_btn and api_configured():
+            if uncategorized_count <= 0:
+                st.warning("当前没有未分类的文章。")
+            else:
+                classify_articles_batch(db.list_uncategorized_articles(filter_brand))
+                st.rerun()
 
-    if batch_summary_btn and api_configured():
-        if not without_ai_summary:
-            st.warning("当前没有待生成 AI 摘要的文章。")
-        else:
-            summarize_articles_batch(without_ai_summary)
-            st.rerun()
+        if batch_summary_btn and api_configured():
+            if without_ai_summary_count <= 0:
+                st.warning("当前没有待生成 AI 摘要的文章。")
+            else:
+                summarize_articles_batch(
+                    db.list_articles_without_ai_summary(filter_brand)
+                )
+                st.rerun()
 
-    if not db.list_articles(filter_brand) and not favorites_only:
-        st.info("暂无文章数据。请先添加品牌，再点击「立即采集」抓取内容。")
-    else:
-        render_article_list(
-            filter_brand,
-            published_start=published_start,
-            published_end=published_end,
-            time_label=time_label,
+        render_article_list_section(brand_names)
+
+    with tab_activities:
+        st.subheader("竞品活动简报")
+        act_col1, act_col2 = st.columns([2, 1], vertical_alignment="center")
+        with act_col1:
+            st.selectbox(
+                "活动提取时间范围",
+                list(ARTICLE_TIME_PRESETS),
+                key="activity_extract_time_preset",
+            )
+        with act_col2:
+            render_html_action_button(
+                "🔍 提取竞品活动信息",
+                html_id="bp-extract-activities-html-btn",
+                disabled=not api_configured(),
+            )
+        extract_activities_clicked = render_hidden_streamlit_button(
+            "提取竞品活动信息",
+            streamlit_key="extract_competitor_activities_btn",
+            disabled=not api_configured(),
         )
+        wire_html_button_to_streamlit(
+            "bp-extract-activities-html-btn",
+            "extract_competitor_activities_btn",
+        )
+        wire_select_html_button_row(
+            "activity_extract_time_preset",
+            "bp-extract-activities-html-btn",
+        )
+
+        if not api_configured():
+            st.caption("请先在 `.env` 中配置 DeepSeek API Key 后再提取竞品活动信息。")
+
+        if extract_activities_clicked and api_configured():
+            preset = st.session_state.get("activity_extract_time_preset", "7日内")
+            pub_start, pub_end, range_label = published_range_for_preset(preset)
+            scoped_articles = cached_list_articles(
+                None,
+                False,
+                pub_start,
+                pub_end,
+                None,
+            )
+            if not scoped_articles:
+                st.warning(f"在「{range_label}」时间范围内暂无已采集文章。")
+                st.session_state.competitor_activities_extracted = False
+            else:
+                with st.spinner(
+                    f"正在从「{range_label}」内的 {len(scoped_articles)} 篇文章中提取竞品活动信息…"
+                ):
+                    activities, act_error = extract_competitor_activities(scoped_articles)
+                if act_error:
+                    st.warning(act_error)
+                st.session_state.competitor_activities = activities
+                st.session_state.competitor_activities_range_label = range_label
+                st.session_state.competitor_activities_extracted = True
+
+        if st.session_state.get("competitor_activities_extracted"):
+            range_label = st.session_state.get(
+                "competitor_activities_range_label", "全部"
+            )
+            st.caption(f"数据范围：{range_label} · 按活动时间倒序展示")
+            render_competitor_activities_table(
+                st.session_state.get("competitor_activities") or []
+            )
 
 
 def render_tone_analysis_cards(brand_name: str, result: dict, article_count: int) -> None:
@@ -1930,7 +2717,7 @@ def render_brand_comparison() -> None:
     st.header("品牌对比分析")
     st.caption("横向对比竞争品牌，并分析单一品牌的内容调性。")
 
-    brands = db.list_brands()
+    brands = get_brands()
     if not brands:
         st.info("请先在「品牌内容管理」中添加品牌并采集文章。")
         return
@@ -1938,26 +2725,27 @@ def render_brand_comparison() -> None:
     brand_options = [b["brand_name"] for b in brands]
 
     st.subheader("品牌调性分析")
-    st.markdown(
-        '<div class="bp-style-marker bp-form-action-anchor"></div>',
-        unsafe_allow_html=True,
-    )
-    tone_col1, tone_col2 = st.columns([2, 1], vertical_alignment="center")
+    tone_col1, tone_col2 = st.columns([3, 1], vertical_alignment="center")
     with tone_col1:
         tone_brand = st.selectbox("选择要分析的品牌", brand_options, key="tone_brand_select")
     with tone_col2:
-        analyze_tone_btn = st.button(
+        render_html_action_button(
             "分析品牌调性",
-            key="analyze_tone_btn",
-            type="primary",
-            use_container_width=True,
+            html_id="bp-analyze-tone-html-btn",
             disabled=not api_configured(),
         )
+    analyze_tone_btn = render_hidden_streamlit_button(
+        "分析品牌调性",
+        streamlit_key="analyze_tone_btn",
+        disabled=not api_configured(),
+    )
+    wire_html_button_to_streamlit("bp-analyze-tone-html-btn", "analyze_tone_btn")
+    wire_select_html_button_row("tone_brand_select", "bp-analyze-tone-html-btn")
 
     if not api_configured():
         st.warning("请先在 `.env` 中配置 `DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL`。")
 
-    tone_articles = db.list_articles(tone_brand)
+    tone_articles = cached_list_articles(tone_brand, False, None, None, None)
     if not tone_articles:
         st.info(f"「{tone_brand}」暂无文章，请先在品牌内容管理中采集 RSS。")
     elif analyze_tone_btn and api_configured():
@@ -1986,19 +2774,12 @@ def render_brand_comparison() -> None:
         '<div class="bp-style-marker bp-form-action-anchor"></div>',
         unsafe_allow_html=True,
     )
-    cmp_col1, cmp_col2, cmp_col3 = st.columns([2, 2, 1], vertical_alignment="center")
+    cmp_col1, cmp_col2 = st.columns(2, vertical_alignment="center")
     with cmp_col1:
         brand_a = st.selectbox("品牌 A", brand_options, index=0, key="compare_a")
     with cmp_col2:
         default_b = 1 if len(brand_options) > 1 else 0
         brand_b = st.selectbox("品牌 B", brand_options, index=default_b, key="compare_b")
-    with cmp_col3:
-        start_compare_btn = st.button(
-            "开始对比",
-            key="start_compare_btn",
-            type="primary",
-            use_container_width=True,
-        )
 
     if brand_a == brand_b:
         st.warning("请选择两个不同的品牌进行对比。")
@@ -2006,32 +2787,26 @@ def render_brand_comparison() -> None:
 
     sample_ids = get_selected_sample_ids()
     sample_count = len(sample_ids)
-    has_sample = sample_count > 0
 
-    st.markdown("**对比数据范围**")
-    if has_sample:
-        article_source = st.radio(
-            "对比数据范围",
-            ["使用全部文章", f"使用自定义样本（已选 {sample_count} 篇）"],
-            index=0,
-            key="compare_article_source",
-            label_visibility="collapsed",
-            horizontal=True,
-        )
-    else:
-        st.radio(
-            "对比数据范围",
-            ["使用全部文章", "使用自定义样本（已选 0 篇）"],
-            index=0,
-            key="compare_article_source_disabled",
-            label_visibility="collapsed",
-            horizontal=True,
-            disabled=True,
-        )
-        st.caption("请先在品牌内容管理页设置对比样本")
-        article_source = "使用全部文章"
+    render_compare_data_mode_buttons(sample_count)
+    use_sample = st.session_state.compare_data_mode == "sample"
+    sample_empty = use_sample and not sample_ids
 
-    use_sample = article_source.startswith("使用自定义样本")
+    if sample_empty:
+        st.markdown(
+            f'<p style="color:{C_DANGER}; font-size:0.95rem; margin:0.25rem 0 0.75rem 0;">'
+            "请先在品牌内容管理页设置对比样本"
+            "</p>",
+            unsafe_allow_html=True,
+        )
+
+    start_compare_btn = st.button(
+        "开始对比",
+        key="start_compare_btn",
+        type="primary",
+        use_container_width=True,
+        disabled=sample_empty,
+    )
 
     articles_a, articles_b, resolve_warnings = resolve_compare_articles(
         brand_a, brand_b, use_sample
@@ -2040,9 +2815,7 @@ def render_brand_comparison() -> None:
         st.warning(warning)
 
     if start_compare_btn:
-        if use_sample and not sample_ids:
-            st.warning("尚未设置对比样本，请先在品牌内容管理页勾选文章并设为对比样本。")
-        elif not use_sample and (not articles_a or not articles_b):
+        if not use_sample and (not articles_a or not articles_b):
             st.warning("两个品牌均需有文章数据才能对比，请先采集 RSS。")
         elif use_sample and not articles_a and not articles_b:
             st.warning("当前样本范围内没有可用于对比的文章。")
@@ -2060,20 +2833,25 @@ def render_brand_comparison() -> None:
                     articles_b,
                     article_ids=sample_ids if use_sample else None,
                 )
-                st.session_state["compare_use_sample"] = use_sample
 
     compare_data = st.session_state.get("brand_compare_data")
+    mode_matches = (
+        bool(compare_data.get("use_sample"))
+        if use_sample
+        else not compare_data.get("use_sample")
+    ) if compare_data else False
     if (
         compare_data
         and compare_data.get("brand_a") == brand_a
         and compare_data.get("brand_b") == brand_b
-        and compare_data.get("use_sample") == use_sample
+        and mode_matches
     ):
+        data_use_sample = bool(compare_data.get("use_sample"))
         render_dual_brand_comparison_results(
             compare_data,
-            articles_a=articles_a if use_sample else None,
-            articles_b=articles_b if use_sample else None,
-            use_sample=use_sample,
+            articles_a=articles_a if data_use_sample else None,
+            articles_b=articles_b if data_use_sample else None,
+            use_sample=data_use_sample,
         )
     elif not start_compare_btn:
         st.caption("选择品牌 A、品牌 B 后，点击「开始对比」查看分析图表。")
@@ -2245,6 +3023,50 @@ def render_dual_brand_comparison_results(
             render_gap_analysis_cards(cached_gap["result"])
 
 
+def render_competitor_activities_table(activities: list[dict]) -> None:
+    if not activities:
+        st.info("未在所选时间范围内的文章中发现竞品活动信息。")
+        return
+
+    st.success(f"共识别 {len(activities)} 条竞品活动信息")
+    rows = sorted(
+        list(activities),
+        key=lambda x: x.get("_sort_time", ""),
+        reverse=True,
+    )
+
+    table_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row['brand_name']))}</td>"
+        f"<td>{html.escape(str(row['activity_type']))}</td>"
+        f"<td>{html.escape(str(row['activity_name']))}</td>"
+        f"<td>{html.escape(str(row['time']))}</td>"
+        f"<td>{html.escape(str(row['location']))}</td>"
+        f'<td><a href="{html.escape(str(row["source_article_link"]))}" '
+        f'target="_blank" rel="noopener noreferrer">阅读原文</a></td>'
+        "</tr>"
+        for row in rows
+    )
+    st.markdown(
+        f"""
+        <table class="bp-topics-table bp-activity-table">
+            <thead>
+                <tr>
+                    <th>品牌名称</th>
+                    <th>活动类型</th>
+                    <th>活动名称</th>
+                    <th>时间</th>
+                    <th>地点</th>
+                    <th>来源文章链接</th>
+                </tr>
+            </thead>
+            <tbody>{table_rows}</tbody>
+        </table>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_gap_analysis_cards(result: dict) -> None:
     brand_a = result["brand_a"]
     brand_b = result["brand_b"]
@@ -2379,7 +3201,7 @@ def render_strategy_generation() -> None:
                 help="仅影响生成文案中的品牌称呼，不改变所依据的差距分析数据。",
             )
         else:
-            brands = db.list_brands()
+            brands = get_brands()
             brand_options = [b["brand_name"] for b in brands] if brands else []
             display_brand = st.text_input(
                 "你的品牌名称",
@@ -2454,8 +3276,13 @@ def main() -> None:
     st.session_state["db_schema_status"] = schema_status
     if "selected_article_ids" not in st.session_state:
         st.session_state["selected_article_ids"] = []
+    init_compare_data_mode()
     init_checked_article_ids()
     init_article_time_filters()
+    init_article_brand_filter()
+    init_article_category_filter()
+    init_activity_extract_time()
+    ensure_shared_data_cache()
     if not st.session_state.get("_db_schema_logged"):
         st.session_state["_db_schema_logged"] = True
         if schema_status.get("has_is_favorite_column"):

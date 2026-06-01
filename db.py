@@ -68,6 +68,15 @@ def init_db() -> dict[str, bool | int]:
                 ai_summary TEXT,
                 is_favorite INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE INDEX IF NOT EXISTS idx_articles_brand_name
+                ON articles(brand_name);
+            CREATE INDEX IF NOT EXISTS idx_articles_published
+                ON articles(published);
+            CREATE INDEX IF NOT EXISTS idx_articles_category
+                ON articles(category);
+            CREATE INDEX IF NOT EXISTS idx_articles_is_favorite
+                ON articles(is_favorite);
             """
         )
         _ensure_brand_columns(conn)
@@ -226,13 +235,19 @@ def list_articles(
     favorites_only: bool = False,
     published_start: str | None = None,
     published_end: str | None = None,
+    category: str | None = None,
 ) -> list[dict]:
-    """列出文章，可按品牌、收藏状态与发布时间范围筛选。"""
+    """列出文章，可按品牌、主题、收藏状态与发布时间范围筛选。"""
     conditions: list[str] = []
     params: list = []
     if brand_name:
         conditions.append("brand_name = ?")
         params.append(brand_name)
+    if category == "未分类":
+        conditions.append("(category IS NULL OR TRIM(category) = '')")
+    elif category:
+        conditions.append("category = ?")
+        params.append(category)
     if favorites_only:
         conditions.append("COALESCE(is_favorite, 0) = 1")
     pub_conds, pub_params = _published_range_conditions(published_start, published_end)
@@ -250,6 +265,45 @@ def list_articles(
             params,
         ).fetchall()
     return [_normalize_article_row(row) for row in rows]
+
+
+def count_articles_by_brand() -> dict[str, int]:
+    """按品牌统计文章数量，避免在 UI 循环中重复查询。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT brand_name, COUNT(*) AS cnt FROM articles GROUP BY brand_name"
+        ).fetchall()
+    return {row["brand_name"]: int(row["cnt"]) for row in rows}
+
+
+def count_uncategorized_articles(brand_name: str | None = None) -> int:
+    conditions = ["(category IS NULL OR TRIM(category) = '')"]
+    params: list = []
+    if brand_name:
+        conditions.append("brand_name = ?")
+        params.append(brand_name)
+    where_clause = " AND ".join(conditions)
+    with get_connection() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM articles WHERE {where_clause}",
+            params,
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+def count_articles_without_ai_summary(brand_name: str | None = None) -> int:
+    conditions = ["(ai_summary IS NULL OR TRIM(ai_summary) = '')"]
+    params: list = []
+    if brand_name:
+        conditions.append("brand_name = ?")
+        params.append(brand_name)
+    where_clause = " AND ".join(conditions)
+    with get_connection() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM articles WHERE {where_clause}",
+            params,
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
 
 
 def list_uncategorized_articles(brand_name: str | None = None) -> list[dict]:
